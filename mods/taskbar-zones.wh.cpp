@@ -2,7 +2,7 @@
 // @id              taskbar-zones
 // @name            Taskbar Zones
 // @description     Organize Windows 11 taskbar apps into fixed left and right zones. Drag icons between sides and keep their positions when apps open or close.
-// @version         1.0.1
+// @version         1.0.3
 // @author          Luiz Bizzio
 // @github          https://github.com/luizbizzio
 // @homepage        https://github.com/luizbizzio/taskbar-zones
@@ -69,11 +69,14 @@ Keep your apps on the **left or right side** of the Windows 11 taskbar. Each app
 
 ## Features
 
-- **Two fixed zones:** Choose the left or right side for each app.
+- **Two adaptive zones:** Choose the left or right side for each app. Icons use the available taskbar space.
 - **Easy drag and drop:** Move apps between zones or change their order.
+- **Icon spacing:** Adjust the space between app icons separately for each zone.
+- **Ungrouped windows:** Windows of one app stay next to each other and move together, including with **Disable grouping on the taskbar**.
 - **Saved layout:** Keep your app positions after restarting Explorer or your PC.
-- **Custom layout:** Adjust spacing and the size of icons on the right.
-- **Multiple monitors:** Supports compatible secondary taskbars.
+- **Custom layout:** Adjust the gap before the notification area.
+- **Multiple monitors:** Each compatible taskbar calculates its own usable area.
+- **Widget-aware layout:** Automatically detect Taskbar System Info and keep app icons clear of supported taskbar widgets without moving the widgets themselves.
 
 ## How to use
 
@@ -82,43 +85,54 @@ Keep your apps on the **left or right side** of the Windows 11 taskbar. Each app
 3. Drag icons within the same zone to reorder them.
 4. Open the mod settings to adjust the layout.
 
+## Optional widget reservations
+
+If a widget needs its own space, you can add its exact XAML `Name` under **Additional reserved widget names (advanced)**. Separate names with commas or semicolons (up to 12). You can leave this setting empty.
+
+Taskbar System Info is detected automatically, so you do not need to add its name.
+
+A named widget must be visible inside the taskbar's `RootGrid`, outside the app list and system tray. Its width must be between 8 DIP and the smaller of 650 DIP or 60% of the taskbar width. It must fit before the tray. Do not add names of icon decorations or overlays.
+
 ## Notes
 
 - Your Windows pinned apps are not changed.
-- Do not enable **Taskbar Split** or other mods that reposition the same icons at the same time.
+- Do not enable **Taskbar Split** together with this mod. Both mods reposition the same taskbar buttons.
+- Other tools that move the same taskbar buttons or reserve their space may conflict with this mod.
 - If the taskbar is too crowded to fit both zones, Windows' normal layout is used until space is available again.
+- Negative icon spacing narrows the buttons. At large values the right edge of the hover highlight or of a badge can be cut off.
+- Windows of the same app keep the order Windows gives them. They cannot be reordered among themselves or placed on different sides.
 - Secondary monitors show only the app buttons that Windows puts on each taskbar.
 - Windows updates may affect compatibility.
 
 ## Credits
 
-**Taskbar Zones** is maintained by **Luiz Bizzio**. It is a separate, modified version of [Taskbar Split by Arkadiusz (Artllex)](https://github.com/Artllex/taskbar-split), with persistent per-app zones, cross-zone dragging and secondary taskbar support.
+**Taskbar Zones** is maintained by **Luiz Bizzio**. It is a separate, modified version of [Taskbar Split by Arkadiusz (Artllex)](https://github.com/Artllex/taskbar-split), with saved app zones, cross-zone dragging, and multi-monitor support.
 
-Licensed under **GPL-3.0**. Additional code credits and copyright notices are in the source file.
+Licensed under **GPL-3.0**. Full source attribution and copyright notices are retained in the code.
 */
 // ==/WindhawkModReadme==
 
 
 // ==WindhawkModSettings==
 /*
-- leftPadding: 0
-  $name: Left edge padding
-  $description: Empty space before the first system button, in device-independent pixels (DIPs).
-- runningGap: 0
-  $name: Gap after system buttons
-  $description: Space between Start/Search/Widgets/Task View and the left app zone.
 - trayGap: 8
   $name: Gap before tray
-  $description: Space between right-side apps and the notification area or system monitoring widget.
-- pinnedIconScale: 100
-  $name: Right-zone icon size
-  $description: Visual size of right-zone icons, from 50 to 100 percent. Click targets keep their native width.
+  $description: Space between right-side apps and the notification area or a reserved widget. Negative values are treated as 0.
+- leftZoneIconSpacing: 0
+  $name: Left zone icon spacing adjustment
+  $description: Extra space between app icons on the left, in pixels at 100% scaling. 0 keeps the Windows size. Negative values make the buttons, and their clickable areas, narrower. The reduction stops before it would cut the icon (about -8 with default icons) and does not apply to buttons with labels. Accepted range is -24 to 48.
+- rightZoneIconSpacing: 0
+  $name: Right zone icon spacing adjustment
+  $description: Same as above, for app icons on the right. Accepted range is -24 to 48.
 - sectionDragging: true
   $name: Enable dragging between zones
   $description: Drag an app to the other side of the gap, or reorder within a side. Disable to keep native Windows dragging.
 - systemButtonsLeft: true
   $name: Keep system buttons on the left
   $description: Put Start, Search, Widgets and Task View at the left edge. Recommended for the intended split layout.
+- extraReservedWidgets: ""
+  $name: Additional reserved widget names (advanced)
+  $description: Up to 12 comma- or semicolon-separated XAML Name values. Widgets must be visible in RootGrid, outside the app list and tray, 8 to 650 DIP wide (max 60% of taskbar width), and inside the area before the tray. Do not list icon overlays. Leave empty if unsure.
 */
 // ==/WindhawkModSettings==
 
@@ -166,15 +180,18 @@ namespace media = winrt::Windows::UI::Xaml::Media;
 namespace numerics = winrt::Windows::Foundation::Numerics;
 
 struct Settings {
-    std::atomic<int> leftPadding{0};
-    std::atomic<int> runningGap{0};
     std::atomic<int> trayGap{8};
-    std::atomic<int> pinnedIconScale{100};
+    std::atomic<int> leftIconSpacing{0};
+    std::atomic<int> rightIconSpacing{0};
     std::atomic<bool> systemButtonsLeft{true};
     std::atomic<bool> sectionDragging{true};
 };
 
 Settings g_settings;
+// A small, explicit list avoids mistaking compositor-positioned icon badges
+// for taskbar reservations. Users may opt in other widgets by XAML Name.
+std::mutex g_reservedWidgetNamesMutex;
+std::vector<std::wstring> g_reservedWidgetNames;
 std::atomic<bool> g_unloading{false};
 std::atomic<bool> g_settingsArrangeFollowup{false};
 std::atomic<bool> g_viewHooksInstalled{false};
@@ -196,13 +213,37 @@ struct CachedLayoutOwner {
 
 void LoadSettings() {
     g_settings.sectionDragging = Wh_GetIntSetting(L"sectionDragging") != 0;
-    g_settings.leftPadding = std::max(0, Wh_GetIntSetting(L"leftPadding"));
-    g_settings.runningGap = std::max(0, Wh_GetIntSetting(L"runningGap"));
     g_settings.trayGap = std::max(0, Wh_GetIntSetting(L"trayGap"));
-    g_settings.pinnedIconScale =
-        std::clamp(Wh_GetIntSetting(L"pinnedIconScale"), 50, 100);
+    g_settings.leftIconSpacing = std::clamp(
+        static_cast<int>(Wh_GetIntSetting(L"leftZoneIconSpacing")), -24, 48);
+    g_settings.rightIconSpacing = std::clamp(
+        static_cast<int>(Wh_GetIntSetting(L"rightZoneIconSpacing")), -24, 48);
     g_settings.systemButtonsLeft =
         Wh_GetIntSetting(L"systemButtonsLeft") != 0;
+
+    // The RAII helper releases the Windhawk setting string after copying.
+    std::wstring names =
+        WindhawkUtils::StringSetting::make(L"extraReservedWidgets").get();
+    std::vector<std::wstring> parsed;
+    size_t start = 0;
+    while (start < names.size() && parsed.size() < 12) {
+        size_t end = names.find_first_of(L",;", start);
+        if (end == std::wstring::npos) end = names.size();
+        auto name = names.substr(start, end - start);
+        auto first = name.find_first_not_of(L" \t\r\n");
+        if (first != std::wstring::npos) {
+            auto last = name.find_last_not_of(L" \t\r\n");
+            name = name.substr(first, last - first + 1);
+            if (name.size() <= 100 && name != L"BlobShape" &&
+                name != L"WindhawkDotStack" &&
+                name != L"WindhawkTaskbarSystemInfo" &&
+                std::find(parsed.begin(), parsed.end(), name) == parsed.end())
+                parsed.push_back(std::move(name));
+        }
+        start = end + 1;
+    }
+    std::lock_guard<std::mutex> lock(g_reservedWidgetNamesMutex);
+    g_reservedWidgetNames.swap(parsed);
 }
 
 FrameworkElement FindDirectChild(
@@ -277,6 +318,16 @@ struct SharedPtrGuard {
     }
 };
 
+// Keep startup/rebuild diagnostics useful without logging every arrange pass.
+void LogDiscoveryFailure(unsigned slot, wchar_t const* reason, HWND window) {
+    static thread_local ULONGLONG last[12]{};
+    ULONGLONG now = GetTickCount64();
+    if (slot >= ARRAYSIZE(last)) return;
+    if (last[slot] && now - last[slot] < 10000) return;
+    last[slot] = now;
+    Wh_Log(L"Taskbar discovery: %ls (HWND %p)", reason, window);
+}
+
 XamlRoot TaskbarXamlRoot(HWND taskbarWindow) {
     wchar_t className[64]{};
     GetClassNameW(taskbarWindow, className, ARRAYSIZE(className));
@@ -291,11 +342,13 @@ XamlRoot TaskbarXamlRoot(HWND taskbarWindow) {
         ? FindWindowExW(taskbarWindow, nullptr, L"WorkerW", nullptr)
         : reinterpret_cast<HWND>(GetPropW(taskbarWindow, L"TaskbandHWND"));
     if (!taskbandWindow) {
+        LogDiscoveryFailure(0, L"taskband window not ready", taskbarWindow);
         return nullptr;
     }
 
     auto taskBand = reinterpret_cast<void*>(GetWindowLongPtrW(taskbandWindow, 0));
     if (!taskBand) {
+        LogDiscoveryFailure(1, L"taskband object not ready", taskbarWindow);
         return nullptr;
     }
 
@@ -311,6 +364,7 @@ XamlRoot TaskbarXamlRoot(HWND taskbarWindow) {
         site = reinterpret_cast<void**>(site) + 1;
     }
     if (!found) {
+        LogDiscoveryFailure(2, L"taskband site not found", taskbarWindow);
         return nullptr;
     }
 
@@ -319,6 +373,7 @@ XamlRoot TaskbarXamlRoot(HWND taskbarWindow) {
                : CTaskBand_GetTaskbarHost_Original)(site, hostSharedPtr);
     SharedPtrGuard release{hostSharedPtr[1]};
     if (!hostSharedPtr[0]) {
+        LogDiscoveryFailure(3, L"taskbar host not ready", taskbarWindow);
         return nullptr;
     }
 
@@ -353,25 +408,150 @@ XamlRoot TaskbarXamlRoot(HWND taskbarWindow) {
     auto unknown = *reinterpret_cast<IUnknown**>(
         reinterpret_cast<BYTE*>(hostSharedPtr[0]) + elementOffset);
     if (!unknown) {
+        LogDiscoveryFailure(4, L"hosted XAML element not ready", taskbarWindow);
         return nullptr;
     }
 
     FrameworkElement hostedElement{nullptr};
     unknown->QueryInterface(winrt::guid_of<FrameworkElement>(),
                             winrt::put_abi(hostedElement));
-    return hostedElement ? hostedElement.XamlRoot() : nullptr;
+    auto root = hostedElement ? hostedElement.XamlRoot() : nullptr;
+    if (!root)
+        LogDiscoveryFailure(4, L"XamlRoot not ready", taskbarWindow);
+    return root;
 }
 
-FrameworkElement FindTaskbarRepeater(FrameworkElement const& root) {
-    auto frame = FindDirectChildByClass(root, L"Taskbar.TaskbarFrame");
-    auto grid = frame ? FindDirectChildByName(frame, L"RootGrid") : nullptr;
-    return grid ? FindDirectChildByName(grid, L"TaskbarFrameRepeater")
-                : nullptr;
-}
-
-// This XAML state stays on the owning taskbar UI thread.
+// This XAML state stays on the owning taskbar UI thread. Keep only the weak
+// repeater reference; reconstruct its frame and grid from the current ancestry.
 [[clang::no_destroy]] thread_local std::unordered_map<HWND,
     winrt::weak_ref<FrameworkElement>> g_repeaterByWindow;
+
+struct TaskbarTree {
+    FrameworkElement frame{nullptr};
+    FrameworkElement grid{nullptr};
+    FrameworkElement repeater{nullptr};
+};
+
+// Validate the real visual ancestry, not just names or a shared XamlRoot.
+// This also rejects detached/recycled repeaters and another monitor's tree.
+TaskbarTree ValidateTaskbarRepeater(FrameworkElement const& root,
+                                   FrameworkElement const& element) {
+    if (!root || !element || element.Name() != L"TaskbarFrameRepeater" ||
+        !element.try_as<winrt::Microsoft::UI::Xaml::Controls::ItemsRepeater>())
+        return {};
+    auto xamlRoot = root.XamlRoot();
+    if (!xamlRoot || element.XamlRoot() != xamlRoot) return {};
+
+    TaskbarTree tree;
+    auto node = element.as<DependencyObject>();
+    for (unsigned depth = 0; node && depth <= 16; ++depth) {
+        if (auto fe = node.try_as<FrameworkElement>()) {
+            if (fe.Visibility() != Visibility::Visible) return {};
+            if (node != element && !tree.frame) {
+                if (winrt::get_class_name(fe) == L"Taskbar.TaskbarFrame") {
+                    if (!tree.grid) return {};
+                    tree.frame = fe;
+                } else if (!tree.grid && fe.Name() == L"RootGrid" &&
+                           fe.try_as<Controls::Grid>()) {
+                    tree.grid = fe;
+                }
+            }
+        }
+        if (node == root) {
+            if (!tree.frame || !tree.grid) return {};
+            tree.repeater = element;
+            return tree;
+        }
+        node = media::VisualTreeHelper::GetParent(node);
+    }
+    return {};
+}
+
+TaskbarTree FindTaskbarTree(FrameworkElement const& root, HWND window = nullptr) {
+    if (!root) return {};
+    // Fast path for the original Windows hierarchy, also when the content
+    // itself is the frame. Do not broaden ordinary widget name searches.
+    auto frame = winrt::get_class_name(root) == L"Taskbar.TaskbarFrame"
+        ? root : FindDirectChildByClass(root, L"Taskbar.TaskbarFrame");
+    auto grid = frame ? FindDirectChildByName(frame, L"RootGrid") : nullptr;
+    auto direct = grid ? FindDirectChildByName(grid, L"TaskbarFrameRepeater")
+                       : nullptr;
+    if (auto tree = ValidateTaskbarRepeater(root, direct); tree.repeater) {
+        if (window) {
+            auto& cached = g_repeaterByWindow[window];
+            if (cached.get() != tree.repeater) cached = tree.repeater;
+        }
+        return tree;
+    }
+
+    // Only reuse a cached repeater if its current ancestry still proves it
+    // belongs to this taskbar. No weak reference is shared between UI threads.
+    if (window) {
+        auto cached = g_repeaterByWindow.find(window);
+        if (cached != g_repeaterByWindow.end()) {
+            auto tree = ValidateTaskbarRepeater(root, cached->second.get());
+            if (tree.repeater) return tree;
+            g_repeaterByWindow.erase(cached);
+        }
+    }
+
+    // New Windows builds may insert ScrollViewer/Border or other containers.
+    // Bounded breadth-first traversal, including non-FrameworkElement nodes.
+    // Never descend into app repeaters, their templates, or the system tray.
+    constexpr size_t kMaxNodes = 512;
+    constexpr unsigned kMaxDepth = 16;
+    struct PendingNode { DependencyObject node; unsigned depth; };
+    std::vector<PendingNode> pending;
+    pending.push_back({root.as<DependencyObject>(), 0});
+    TaskbarTree match;
+    for (size_t i = 0; i < pending.size(); ++i) {
+        // Copy before push_back: vector growth can invalidate references.
+        auto current = pending[i];
+        if (auto fe = current.node.try_as<FrameworkElement>()) {
+            if (fe.Visibility() != Visibility::Visible) continue;
+            auto name = fe.Name();
+            auto className = winrt::get_class_name(fe);
+            if (name == L"SystemTrayFrame" ||
+                className == L"SystemTray.SystemTrayFrame" ||
+                className == L"Taskbar.TaskListButton") continue;
+            if (fe.try_as<winrt::Microsoft::UI::Xaml::Controls::ItemsRepeater>()) {
+                auto tree = ValidateTaskbarRepeater(root, fe);
+                if (tree.repeater) {
+                    if (match.repeater && match.repeater != tree.repeater) {
+                        LogDiscoveryFailure(5, L"ambiguous TaskbarFrameRepeater", window);
+                        return {};
+                    }
+                    match = tree;
+                }
+                continue;
+            }
+        }
+        if (current.depth >= kMaxDepth) continue;
+        int count = media::VisualTreeHelper::GetChildrenCount(current.node);
+        for (int j = 0; j < count; ++j) {
+            if (pending.size() >= kMaxNodes) {
+                LogDiscoveryFailure(5, L"XAML discovery node limit reached", window);
+                return {};
+            }
+            auto child = media::VisualTreeHelper::GetChild(current.node, j);
+            if (child) pending.push_back({child, current.depth + 1});
+        }
+    }
+    if (!match.repeater) {
+        LogDiscoveryFailure(5, L"TaskbarFrame/RootGrid/ItemsRepeater not found", window);
+        return {};
+    }
+    if (window) g_repeaterByWindow[window] = match.repeater;
+    static std::atomic<bool> loggedNestedTree{false};
+    if (!loggedNestedTree.exchange(true))
+        Wh_Log(L"Taskbar discovery: nested TaskbarFrame/RootGrid/ItemsRepeater found");
+    return match;
+}
+
+FrameworkElement FindTaskbarRepeater(FrameworkElement const& root,
+                                     HWND window) {
+    return FindTaskbarTree(root, window).repeater;
+}
 struct TaskbarUiState;
 TaskbarUiState& Ui();
 
@@ -392,26 +572,44 @@ FrameworkElement GetTaskbarRepeater() {
     // alive repeater must not remain in the cache after a monitor reconnect.
     auto root = TaskbarXamlRoot(window);
     auto content = root ? root.Content().try_as<FrameworkElement>() : nullptr;
-    auto repeater = content ? FindTaskbarRepeater(content) : nullptr;
-    if (auto found = g_repeaterByWindow.find(window); found != g_repeaterByWindow.end()) {
-        if (repeater && found->second.get() == repeater) return repeater;
-        g_repeaterByWindow.erase(found);
+    if (!content) {
+        g_repeaterByWindow.erase(window);
+        return nullptr;
     }
-    if (repeater) g_repeaterByWindow[window] = repeater;
-    return repeater;
+    return FindTaskbarTree(content, window).repeater;
 }
 
 
+// Prefer the full native hit area. On some taskbar rebuilds ActualWidth is
+// temporarily inflated even though BOTH the Windows layout slot and desired
+// width still agree on a normal-sized button. Only then use the slot width;
+// intentional wide-label buttons keep their real width/hit target.
 double ElementWidth(FrameworkElement const& element) {
-    if (element.Visibility() != Visibility::Visible) {
-        return 0;
-    }
+    if (element.Visibility() != Visibility::Visible) return 0;
     Thickness margin = element.Margin();
-    double width = element.ActualWidth();
-    if (width <= 0) {
-        return std::max(0.0, static_cast<double>(element.DesiredSize().Width));
+    double actualWidth = element.ActualWidth();
+    // XAML DesiredSize and LayoutSlot already contain the margins. Only
+    // ActualWidth describes the border box and needs margins added.
+    double outerWidth = std::isfinite(actualWidth) && actualWidth > 0
+        ? actualWidth + margin.Left + margin.Right
+        : element.DesiredSize().Width;
+    if (!std::isfinite(outerWidth) || outerWidth <= 0) return 0;
+
+    if (winrt::get_class_name(element) == L"Taskbar.TaskListButton") {
+        try {
+            double slotWidth = Controls::Primitives::LayoutInformation::
+                GetLayoutSlot(element).Width;
+            double desired = element.DesiredSize().Width;
+            if (std::isfinite(slotWidth) && std::isfinite(desired) &&
+                slotWidth >= 20 && desired >= 20 &&
+                std::abs(slotWidth - desired) <= 8 &&
+                outerWidth > slotWidth + 24 &&
+                outerWidth > slotWidth * 1.5) {
+                return slotWidth;
+            }
+        } catch (...) { /* Native width remains the safe default. */ }
     }
-    return std::max(0.0, margin.Left + width + margin.Right);
+    return outerWidth;
 }
 
 // Content DesiredSize avoids the inflated ActualWidth caused by the shell's
@@ -486,7 +684,7 @@ FrameworkElement FindWidgets(FrameworkElement const& node, int depth = 0) {
 
 void ReserveNativeWidgets(FrameworkElement const& content,
                           double& leftEdge, double& rightEdge) {
-    auto frame = FindDirectChildByClass(content, L"Taskbar.TaskbarFrame");
+    auto frame = FindTaskbarTree(content, g_activeTaskbarWindow).frame;
     if (!frame) return;
     if (g_widgetsWindow != g_activeTaskbarWindow ||
         g_widgetsInvalidated.exchange(false) || g_widgetsFrame.get() != frame) {
@@ -532,149 +730,13 @@ bool IsTaskButton(FrameworkElement const& element) {
     return winrt::get_class_name(element) == L"Taskbar.TaskListButton";
 }
 
-struct AppliedVisualState {
-    winrt::weak_ref<FrameworkElement> element;
-    HWND owner = nullptr;
-    numerics::float3 originalScale{};
-    numerics::float3 originalCenterPoint{};
-    bool scaleApplied = false;
-};
-
-// Only weak UI references and numeric values: no strong thread-affine Visual
-// references are released by a global destructor during process shutdown.
-[[clang::no_destroy]] thread_local std::unordered_map<void*, AppliedVisualState> g_visualStates;
-
-AppliedVisualState* CurrentVisualState(FrameworkElement const& element) {
-    auto found = g_visualStates.find(winrt::get_abi(element));
-    if (found == g_visualStates.end()) {
-        return nullptr;
-    }
-    auto storedElement = found->second.element.get();
-    if (!storedElement || storedElement != element) {
-        g_visualStates.erase(found);
-        return nullptr;
-    }
-    // Recycled XAML/ABI addresses must not inherit a different taskbar's scale.
-    if (found->second.owner != g_activeTaskbarWindow) return nullptr;
-    return &found->second;
-}
-
-void RestoreElementState(AppliedVisualState& applied);
-AppliedVisualState& EnsureVisualState(FrameworkElement const& element) {
-    if (auto current = CurrentVisualState(element)) {
-        return *current;
-    }
-
-    AppliedVisualState applied;
-    applied.element = element;
-    applied.owner = g_activeTaskbarWindow;
-    void* key = winrt::get_abi(element);
-    // Address reuse across XAML roots must not silently keep an old owner.
-    if (auto existing = g_visualStates.find(key); existing != g_visualStates.end()) {
-        try { RestoreElementState(existing->second); } catch (...) {}
-        g_visualStates.erase(existing);
-    }
-    return g_visualStates.emplace(key, std::move(applied)).first->second;
-}
-
-void ScaleElement(FrameworkElement const& element, double scaleValue) {
-    if (scaleValue == 1.0 && !CurrentVisualState(element)) {
-        return;
-    }
-    auto& applied = EnsureVisualState(element);
-
-    if (scaleValue == 1.0) {
-        if (applied.scaleApplied) {
-            element.Scale(applied.originalScale);
-            element.CenterPoint(applied.originalCenterPoint);
-            applied.scaleApplied = false;
-        }
-        return;
-    }
-    if (!applied.scaleApplied) {
-        applied.originalScale = element.Scale();
-        applied.originalCenterPoint = element.CenterPoint();
-        // Mark before writes so a partial failure can still be restored.
-        applied.scaleApplied = true;
-    }
-    auto centerPoint = applied.originalCenterPoint;
-    // Placement math assumes scaling from the left edge.
-    centerPoint.x = 0;
-    centerPoint.y = static_cast<float>(element.ActualHeight() / 2.0);
-    element.CenterPoint(centerPoint);
-
-    auto scale = applied.originalScale;
-    scale.x *= static_cast<float>(scaleValue);
-    scale.y *= static_cast<float>(scaleValue);
-    element.Scale(scale);
-}
-
-void RestoreElementState(AppliedVisualState& applied) {
-    if (auto element = applied.element.get()) {
-        if (applied.scaleApplied) {
-            element.Scale(applied.originalScale);
-            element.CenterPoint(applied.originalCenterPoint);
-            applied.scaleApplied = false;
-        }
-    }
-}
-
-void PruneVisualStates(std::vector<FrameworkElement> const& children) {
-    std::unordered_set<void*> live;
-    for (auto const& child : children) {
-        live.insert(winrt::get_abi(child));
-    }
-    for (auto it = g_visualStates.begin(); it != g_visualStates.end();) {
-        if (it->second.owner != g_activeTaskbarWindow) {
-            ++it;
-            continue;
-        }
-        if (!live.count(it->first) || !it->second.element.get()) {
-            // A detached but still alive element must be restored before
-            // forgetting it, in case Windows later reuses the same object.
-            try {
-                RestoreElementState(it->second);
-            } catch (winrt::hresult_error const&) {
-            }
-            it = g_visualStates.erase(it);
-        } else {
-            ++it;
-        }
-    }
-}
-
-void RestoreVisualStatesForChildren(std::vector<FrameworkElement> const& children) {
-    for (auto const& child : children) {
-        auto it = g_visualStates.find(winrt::get_abi(child));
-        if (it == g_visualStates.end() || it->second.owner != g_activeTaskbarWindow) continue;
-        try { RestoreElementState(it->second); } catch (...) {}
-        g_visualStates.erase(it);
-    }
-}
-
-bool RestoreVisualStatesForWindow(HWND window) {
-    bool restored = true;
-    for (auto it = g_visualStates.begin(); it != g_visualStates.end();) {
-        if (it->second.owner != window) { ++it; continue; }
-        try {
-            RestoreElementState(it->second);
-            it = g_visualStates.erase(it);
-        } catch (...) {
-            // Keep the state for a future layout/unload retry if still attached.
-            restored = false;
-            Wh_Log(L"Could not restore one taskbar button's visual state");
-            ++it;
-        }
-    }
-    return restored;
-}
-
-
 struct ButtonInfo {
     FrameworkElement element;
-    double width;
+    double width;  // arrange slot width
     bool leftSide;
     std::wstring appId;
+    double narrowedWidth = 0;  // equals width when narrowed, otherwise 0
+    double nativeWidth = 0;
 };
 
 // Per-taskbar UI references must never be reused on another monitor.
@@ -684,19 +746,43 @@ struct TaskbarSlot {
     double x = 0;
     double width = 0;
 };
+// Last non-empty AppID seen on a live task button container.
+struct RememberedAppId {
+    winrt::weak_ref<FrameworkElement> element;
+    std::wstring id;
+    ULONGLONG seen = 0;
+};
+// A button this mod arranges narrower than its native width. Depending on the
+// button template, ActualWidth may then report either width.
+struct NarrowedButton {
+    winrt::weak_ref<FrameworkElement> element;
+    double nativeWidth = 0;
+    double slotWidth = 0;
+};
 struct TaskbarUiState {
+    std::unordered_map<void*, NarrowedButton> narrowed;
+    // Arrange slot width of every app button in the latest plan.
+    std::unordered_map<void*, double> slotWidths;
+    double leftGap = 0, rightGap = 0;
+    // App identity tracking. Session only; none of this is ever persisted.
+    std::unordered_map<void*, RememberedAppId> rememberedIds;
+    // Raw IDs used by the latest plan, so an in-place change is noticed.
+    std::vector<std::pair<winrt::weak_ref<FrameworkElement>, std::wstring>>
+        plannedIds;
+    std::vector<std::wstring> nativeIds;  // task buttons in Windows' order
     unsigned long long geometryEpoch = 1;
     bool geometryInitialized = false;
     double lastContentWidth = 0, lastContentHeight = 0;
     double lastRepeaterX = 0, lastLeftBound = 0, lastRightBound = 0;
+    double lastTrayX = 0;
     double lastLeftGroupWidth = 0, lastRightGroupWidth = 0;
     double lastDpi = 0;
     size_t lastButtonCount = 0;
     uint64_t lastButtonIdentity = 0;
     ULONGLONG lastCrowdingLog = 0;
     ULONGLONG lastCrowdingRetry = 0;
-    ULONGLONG lastValidLayoutTick = 0;
-    unsigned long long lastValidConfigEpoch = 0;
+    ULONGLONG lastPostArrangeErrorLog = 0;
+    double lastSystemStart = 0, lastSystemWidth = 0;
     std::vector<winrt::weak_ref<FrameworkElement>> leftLive;
     std::vector<winrt::weak_ref<FrameworkElement>> rightLive;
     std::vector<std::wstring> leftAppOrder;
@@ -710,161 +796,259 @@ struct TaskbarUiState {
 [[clang::no_destroy]] thread_local std::unordered_map<HWND, TaskbarUiState> g_uiStates;
 TaskbarUiState& Ui() { return g_uiStates[g_activeTaskbarWindow]; }
 
-// The monitor widget is owned by another Windhawk mod. This mod never writes
-// its XAML Margin, Width or position: doing so would create competing layout
-// owners. Instead the icon group uses a fixed-width slot before the tray.
+// The taskbar's usable region is discovered from known or explicitly named
+// widgets. Never write coordinates or margins owned by another mod.
 void RequestRefreshFor(HWND window);
 bool IsTaskbarWindow(HWND window);
+bool AppIdentityChanged(TaskbarUiState const& ui);
 double TrayEdgeForContent(FrameworkElement const& content,
                           FrameworkElement const& relativeTo);
 FrameworkElement FindNamedDescendant(FrameworkElement const& node,
                                      wchar_t const* name, int depth);
-struct WidgetWatch {
-    winrt::weak_ref<FrameworkElement> root;
-    bool observed = false;
-    bool visible = false;
-    bool pollTimerArmed = false;
-    UINT pollIntervalMs = 400;
-    double width = 0;
-    double x = 0;
-    double trayX = 0;
-    double stableX = 0;
-    double lastGoodWidth = 0;
-    ULONGLONG lastGoodTick = 0;
-    ULONGLONG lastExpiredRefresh = 0;
-    unsigned stableSamples = 0;
-    ULONGLONG lastMismatchLog = 0;
-};
-[[clang::no_destroy]] thread_local std::unordered_map<HWND, WidgetWatch> g_widgetWatches;
 
-UINT_PTR WidgetPollTimerId() {
+struct HorizontalSpan {
+    double left = 0;
+    double right = 0;
+};
+std::vector<HorizontalSpan> CollectExternalSpans(FrameworkElement const& content);
+std::vector<HorizontalSpan> EffectiveExternalSpans(FrameworkElement const& content);
+bool ResolveAvailableZoneBounds(double leftWidth, double rightWidth,
+                                std::vector<HorizontalSpan> const& obstacles,
+                                double& leftEdge, double& rightEdge,
+                                double leftClearance, double rightClearance);
+
+struct BoundaryWatch {
+    winrt::weak_ref<FrameworkElement> content;
+    bool observed = false;
+    bool pollTimerArmed = false;
+    UINT pollIntervalMs = 1000;
+    double trayX = 0;
+    double lastGoodContentWidth = 0;
+    double lastScanContentWidth = 0;
+    ULONGLONG lastGoodTick = 0;
+    ULONGLONG lastScanTick = 0;
+    std::vector<HorizontalSpan> spans;
+    // Remember a widget's right-side slot when it is beside the tray. A
+    // native tray expansion must not let two independently-positioning mods
+    // chase each other by vacating and reclaiming that slot.
+    bool rightDockTracked = false;
+    double rightDockWidth = 0;
+    double rightDockTrailingGap = 0;
+    double rightDockObservedTray = 0;
+    ULONGLONG rightDockHoldUntil = 0;
+    // Do not publish another mod's intermediate placement during a tray
+    // animation. Each taskbar owns one candidate and one accepted snapshot.
+    bool pending = false;
+    double pendingTrayX = 0;
+    ULONGLONG pendingSince = 0;
+    std::vector<HorizontalSpan> pendingSpans;
+    // Weak XAML references are confined to their owning taskbar UI thread.
+    std::unordered_map<std::wstring, winrt::weak_ref<FrameworkElement>> namedWidgets;
+    ULONGLONG lastBoundaryLog = 0;
+};
+[[clang::no_destroy]] thread_local std::unordered_map<HWND, BoundaryWatch>
+    g_boundaryWatches;
+
+UINT_PTR BoundaryPollTimerId() {
     static int timerTag;
     return reinterpret_cast<UINT_PTR>(&timerTag);
 }
 
-void RemoveWidgetWatch(HWND window) {
-    auto it = g_widgetWatches.find(window);
-    if (it == g_widgetWatches.end()) return;
-    if (it->second.pollTimerArmed) KillTimer(window, WidgetPollTimerId());
-    g_widgetWatches.erase(it);
+void RemoveBoundaryWatch(HWND window) {
+    auto it = g_boundaryWatches.find(window);
+    if (it == g_boundaryWatches.end()) return;
+    if (it->second.pollTimerArmed) KillTimer(window, BoundaryPollTimerId());
+    g_boundaryWatches.erase(it);
 }
 
-// Polling on the taskbar owner HWND observes Taskbar System Info injection,
-// detachment, position and width without registering a XAML event delegate.
-// No retained XAML delegate points into this DLL. HWND timer cleanup is
-// attempted on every removal path, including failed owner-thread restores.
-// Geometry updates are limited to 400 ms; we never react to our own layout
-// by writing new widget coordinates or creating a recursive invalidation.
-void PollWidgetGeometry(HWND window) {
+// When an existing widget is rebuilt, keep its last measured space for at
+// most 1.2 seconds. The same rule is used by both the poller and the planner.
+std::vector<HorizontalSpan> RetainTransientSpans(
+        FrameworkElement const& content, BoundaryWatch const& watch,
+        std::vector<HorizontalSpan> spans, ULONGLONG now) {
+    if (spans.empty() && watch.content.get() == content &&
+        !watch.spans.empty() && watch.lastGoodTick &&
+        now - watch.lastGoodTick < 1200 &&
+        std::abs(watch.lastGoodContentWidth - content.ActualWidth()) < 1)
+        return watch.spans;
+    return spans;
+}
+
+// All geometry comparisons use the same tolerance. Transient layout passes
+// and text rounding can move a measured edge by less than one DIP.
+bool BoundaryGeometryChanged(double trayA,
+                             std::vector<HorizontalSpan> const& spansA,
+                             double trayB,
+                             std::vector<HorizontalSpan> const& spansB) {
+    auto differs = [](double a, double b) {
+        return !std::isfinite(a) || !std::isfinite(b) ||
+               std::abs(a - b) > 1.0;
+    };
+    if (differs(trayA, trayB) || spansA.size() != spansB.size()) return true;
+    for (size_t i = 0; i < spansA.size(); ++i) {
+        if (differs(spansA[i].left, spansB[i].left) ||
+            differs(spansA[i].right, spansB[i].right)) return true;
+    }
+    return false;
+}
+
+// A widget that formerly forced a zone inward may have moved away. In that
+// case we need one refresh to return the group to its natural boundary, even
+// though the new widget position does not overlap the current group.
+bool WasConstrainingZone(TaskbarUiState const& ui,
+                        std::vector<HorizontalSpan> const& oldSpans) {
+    if (!ui.layoutValid) return false;
+    constexpr double kClearance = 6.0;
+    constexpr double kTolerance = 1.5;
+    for (auto const& span : oldSpans) {
+        if (ui.lastRightGroupWidth > 0 &&
+            std::abs(ui.lastRightBound - (span.left -
+                std::max(kClearance, double(g_settings.trayGap.load())))) <= kTolerance)
+            return true;
+        if (ui.lastLeftGroupWidth > 0 &&
+            std::abs(ui.lastLeftBound - (span.right + kClearance)) <= kTolerance)
+            return true;
+        if (ui.lastSystemWidth > 0 &&
+            std::abs(ui.lastSystemStart - (span.right + kClearance)) <= kTolerance)
+            return true;
+    }
+    return false;
+}
+
+// Only invalidate an in-progress drag when a changed obstacle actually
+// collides with the frozen app or system-button rectangles. A live readout
+// changing inside the middle gap should not cancel a drag.
+bool BoundaryChangeBlocksLayout(TaskbarUiState const& ui, double trayX,
+                                std::vector<HorizontalSpan> const& spans) {
+    if (!ui.layoutValid || !ui.geometryInitialized) return false;
+    double trayGap = std::max(0.0, double(g_settings.trayGap.load()));
+    // A growing native tray must shift the right zone, while a shrinking tray
+    // must also allow the icons to return. Comparing only the current right
+    // bound would miss this second case.
+    if (!std::isfinite(trayX) ||
+        std::abs(ui.lastTrayX - trayX) > 1.0 ||
+        ui.lastRightBound > trayX - trayGap + 0.5) return true;
+
+    double left = ui.lastLeftBound, right = ui.lastRightBound;
+    if (!ResolveAvailableZoneBounds(ui.lastLeftGroupWidth,
+            ui.lastRightGroupWidth, spans, left, right, 6.0,
+            std::max(6.0, trayGap))) return true;
+    if (std::abs(left - ui.lastLeftBound) > 0.5 ||
+        std::abs(right - ui.lastRightBound) > 0.5) return true;
+
+    if (ui.lastSystemWidth > 0) {
+        double systemStart = ui.lastSystemStart;
+        double dummyRight = ui.lastRightBound;
+        if (!ResolveAvailableZoneBounds(ui.lastSystemWidth, 0, spans,
+                systemStart, dummyRight, 6.0, 6.0)) return true;
+        if (std::abs(systemStart - ui.lastSystemStart) > 0.5) return true;
+    }
+    return false;
+}
+
+// A timer attached to each taskbar owner samples independently. One tray
+// notification can make Windows reflow the tray and another mod remeasure its
+// widget. Ignore intermediate widget positions until two samples agree.
+void PollBoundaryGeometry(HWND window) {
     if (g_unloading || !IsTaskbarWindow(window) ||
         GetWindowThreadProcessId(window, nullptr) != GetCurrentThreadId()) return;
-    auto it = g_widgetWatches.find(window);
-    if (it == g_widgetWatches.end()) return;
-    auto root = it->second.root.get();
-    if (!root) return;
+    auto it = g_boundaryWatches.find(window);
+    if (it == g_boundaryWatches.end()) return;
+    auto content = it->second.content.get();
+    if (!content) return;
     try {
-        auto monitor = FindDirectChildByName(root, L"WindhawkTaskbarSystemInfo");
-        bool visible = monitor && monitor.Visibility() == Visibility::Visible;
-        double width = 0, x = 0;
-        if (visible) {
-            width = monitor.ActualWidth();
-            if (!std::isfinite(width) || width <= 2) width = monitor.Width();
-            if (!std::isfinite(width) || width <= 2) width = 0;
-            x = ElementX(monitor, root);
-            if (!std::isfinite(x)) x = 0;
-        }
-        auto xaml = root.XamlRoot();
-        auto content = xaml ? xaml.Content().try_as<FrameworkElement>() : nullptr;
-        if (!content || !std::isfinite(content.ActualWidth()) ||
-            content.ActualWidth() <= 0) return; // XAML host is rebuilding.
-        double trayX = TrayEdgeForContent(content, root);
-        if (!std::isfinite(trayX) || trayX <= 0) return;
-        auto& state = it->second;
-        // Poll actively when the widget is present or the split is crowded.
-        // In the ordinary no-widget case, use a slower watch for late injection.
-        UINT interval = (visible || state.lastGoodWidth > 2 ||
-                         !g_uiStates[window].layoutValid) ? 400 : 1600;
-        if (state.pollTimerArmed && state.pollIntervalMs != interval &&
-            SetTimer(window, WidgetPollTimerId(), interval, nullptr))
-            state.pollIntervalMs = interval;
-        auto moved = [](double a, double b) {
-            return !std::isfinite(a) || !std::isfinite(b) ||
-                std::abs(a-b) > 1.0;
-        };
+        auto xamlRoot = content.XamlRoot();
+        if (!xamlRoot || xamlRoot.Content().try_as<FrameworkElement>() != content) return;
+        if (auto state = g_uiStates.find(window);
+            state != g_uiStates.end() && AppIdentityChanged(state->second))
+            RequestRefreshFor(window);
+        double trayX = TrayEdgeForContent(content, content);
+        if (!std::isfinite(trayX) || trayX <= 0 ||
+            !std::isfinite(content.ActualWidth()) || content.ActualWidth() <= 0)
+            return;
+        auto& watch = it->second;
+        auto spans = CollectExternalSpans(content);
         ULONGLONG now = GetTickCount64();
-        bool widthChanged = !state.observed || state.visible != visible ||
-                            moved(state.width, width);
-        bool positionChanged = !state.observed || moved(state.x, x);
-        bool trayChanged = !state.observed || moved(state.trayX, trayX);
-        if (visible && width > 2 && std::isfinite(x) && x >= 0) {
-            state.lastGoodWidth = width;
-            state.lastGoodTick = now;
-            if (positionChanged) state.stableSamples = 0;
-            else if (state.stableSamples < 3) ++state.stableSamples;
-        } else state.stableSamples = 0;
-        bool stableChanged = visible && width > 2 && state.stableSamples == 2 &&
-            moved(state.stableX, x);
-        if (stableChanged) state.stableX = x;
-        bool reservationExpired = !visible && state.lastGoodWidth > 2 &&
-            now - state.lastGoodTick >= 1800 &&
-            (!state.lastExpiredRefresh || now - state.lastExpiredRefresh > 30000);
-        if (reservationExpired) {
-            state.lastGoodWidth = 0;
-            state.lastExpiredRefresh = now;
+        if (!spans.empty()) {
+            watch.lastGoodTick = now;
+            watch.lastGoodContentWidth = content.ActualWidth();
         }
-        if (!widthChanged && !positionChanged && !trayChanged &&
-            !stableChanged && !reservationExpired) {
-            // Recover after a temporary crowded/native fallback, even if the
-            // widget's dimensions have not changed since the last poll.
-            auto& ui = g_uiStates[window];
+        spans = RetainTransientSpans(content, watch, std::move(spans), now);
+        watch.lastScanTick = now;
+        watch.lastScanContentWidth = content.ActualWidth();
+        auto& ui = g_uiStates[window];
+
+        bool changed = !watch.observed || BoundaryGeometryChanged(
+            trayX, spans, watch.trayX, watch.spans);
+        if (!changed) {
+            watch.pending = false;
+            watch.pendingSpans.clear();
             if (!ui.layoutValid && now - ui.lastCrowdingRetry > 1000) {
                 ui.lastCrowdingRetry = now;
                 RequestRefreshFor(window);
             }
-            return;
+        } else {
+            // The initial sample is safe to accept immediately: no older
+            // geometry exists. Later changes must persist across two polls.
+            if (watch.observed) {
+                if (!watch.pending || BoundaryGeometryChanged(trayX, spans,
+                        watch.pendingTrayX, watch.pendingSpans)) {
+                    watch.pending = true;
+                    watch.pendingTrayX = trayX;
+                    watch.pendingSpans = std::move(spans);
+                    watch.pendingSince = now;
+                } else if (now - watch.pendingSince >= 180) {
+                    watch.pending = false;
+                    spans = std::move(watch.pendingSpans);
+                    watch.pendingSpans.clear();
+                }
+            }
+            if (!watch.pending) {
+                bool affectsLayout = !watch.observed || !ui.layoutValid ||
+                    BoundaryChangeBlocksLayout(ui, trayX, spans) ||
+                    WasConstrainingZone(ui, watch.spans);
+                if (!watch.lastBoundaryLog || now - watch.lastBoundaryLog > 30000) {
+                    watch.lastBoundaryLog = now;
+                    double firstReserved = spans.empty() ? -1.0 : spans.front().left;
+                    Wh_Log(L"Taskbar %p: tray X %.1f DIP, reserved %zu, first X %.1f DIP",
+                           window, trayX, spans.size(), firstReserved);
+                }
+                watch.observed = true;
+                watch.trayX = trayX;
+                watch.spans = std::move(spans);
+                // A moving widget in the empty middle gap does not affect
+                // either app zone; never trigger a no-op arrange in that case.
+                if (affectsLayout) {
+                    ++ui.geometryEpoch;
+                    RequestRefreshFor(window);
+                }
+            }
         }
-        state.observed = true;
-        state.visible = visible;
-        state.width = width;
-        state.x = x;
-        state.trayX = trayX;
-        // A widget configured in the middle cannot be moved by this mod:
-        // report the mismatch without chasing its animated X coordinate.
-        if (visible && width > 2 && std::isfinite(trayX) &&
-            std::abs(x - (trayX - width)) > 32 &&
-            (state.lastMismatchLog == 0 || now - state.lastMismatchLog > 30000)) {
-            state.lastMismatchLog = now;
-            Wh_Log(L"Taskbar System Info HWND %p is %.1f DIP away from right-side slot; change its own placement if icons overlap",
-                   window, x - (trayX - width));
-        }
-        // Only boundary changes invalidate a frozen drag. Ordinary XAML
-        // animations of the widget cannot cancel an unrelated user gesture.
-        auto& ui = g_uiStates[window];
-        if (widthChanged || trayChanged || stableChanged || reservationExpired) {
-            ++ui.geometryEpoch;
-            RequestRefreshFor(window);
-        }
+
+        UINT interval = watch.pending ? 200 :
+            ((!watch.spans.empty() || !ui.layoutValid) ? 400 : 1600);
+        if (watch.pollTimerArmed && watch.pollIntervalMs != interval &&
+            SetTimer(window, BoundaryPollTimerId(), interval, nullptr))
+            watch.pollIntervalMs = interval;
     } catch (...) {
-        // XAML can be replaced while Windows rebuilds secondary taskbars.
+        // A taskbar XAML tree may disappear during monitor reconnects.
     }
 }
 
-void EnsureWidgetWatch(FrameworkElement const& content) {
+void EnsureBoundaryWatch(FrameworkElement const& content) {
     HWND window = g_activeTaskbarWindow;
     if (!window || !content) return;
-    auto frame = FindDirectChildByClass(content, L"Taskbar.TaskbarFrame");
-    auto root = frame ? FindDirectChildByName(frame, L"RootGrid") : nullptr;
-    if (!root) return;
-    auto found = g_widgetWatches.find(window);
-    if (found != g_widgetWatches.end() &&
-        found->second.root.get() == root && found->second.pollTimerArmed) return;
-    RemoveWidgetWatch(window);
-    auto& state = g_widgetWatches[window];
-    state.root = root;
-    state.pollTimerArmed = SetTimer(window, WidgetPollTimerId(), 400, nullptr) != 0;
+    auto found = g_boundaryWatches.find(window);
+    if (found != g_boundaryWatches.end() &&
+        found->second.content.get() == content && found->second.pollTimerArmed)
+        return;
+    RemoveBoundaryWatch(window);
+    auto& state = g_boundaryWatches[window];
+    state.content = content;
+    state.pollTimerArmed = SetTimer(window, BoundaryPollTimerId(), 400, nullptr) != 0;
     if (!state.pollTimerArmed)
-        Wh_Log(L"Could not schedule widget geometry watcher for HWND %p", window);
-    PollWidgetGeometry(window);
+        Wh_Log(L"Could not schedule geometry watcher for taskbar %p", window);
+    PollBoundaryGeometry(window);
 }
 
 struct PersistedAppState {
@@ -897,12 +1081,61 @@ bool IsFixedRight(std::wstring const& id) {
         Ui().rightAppIds.end(), id) != Ui().rightAppIds.end();
 }
 
-bool ButtonIsLeftSide(FrameworkElement const& element) {
-    return !IsFixedRight(ButtonAppId(element));
+// [grouping ids]
+// "Disable grouping on the taskbar" (taskbar-grouping by m417z, GPL-3.0) gives
+// each extra window its own AppID: the original one plus "~Wh~", a type letter
+// (w, c or p) and 8 uppercase hex digits. Only that exact marker is removed;
+// AppIDs are never matched by executable name or window title.
+std::wstring StripGroupingSuffix(std::wstring const& id) {
+    constexpr size_t kSuffixLength = 13;
+    if (id.size() <= kSuffixLength) return id;
+    size_t start = id.size() - kSuffixLength;
+    if (id.compare(start, 4, L"~Wh~") != 0) return id;
+    wchar_t type = id[start + 4];
+    if (type != L'w' && type != L'c' && type != L'p') return id;
+    for (size_t i = start + 5; i < id.size(); ++i) {
+        if (!((id[i] >= L'0' && id[i] <= L'9') ||
+              (id[i] >= L'A' && id[i] <= L'F'))) return id;
+    }
+    return id.substr(0, start);
+}
+// [end grouping ids]
+
+// [app identity]
+// XAML can briefly report no AppID while a button is being updated. Keep the
+// same container's previous ID for a short time instead of treating it as an
+// unknown (left-zone) app. Containers are recycled, so this must expire.
+constexpr ULONGLONG kEmptyAppIdGraceMs = 3000;
+
+std::wstring CurrentAppId(FrameworkElement const& element) {
+    auto id = ButtonAppId(element);
+    if (!id.empty()) return id;
+    auto& remembered = Ui().rememberedIds;
+    auto found = remembered.find(winrt::get_abi(element));
+    if (found != remembered.end() &&
+        found->second.element.get() == element &&
+        GetTickCount64() - found->second.seen < kEmptyAppIdGraceMs)
+        return found->second.id;
+    return {};
 }
 
-// Calculate the right edge in the coordinate space requested by the caller.
-// Reserve space for both the Windows tray and Taskbar System Info when present.
+// The identity used for zones, saved order and dragging. Windows of one app
+// share it, so they stay adjacent and move between zones together.
+std::wstring ButtonKey(FrameworkElement const& element) {
+    return StripGroupingSuffix(CurrentAppId(element));
+}
+
+bool ContainsId(std::vector<std::wstring> const& ids, std::wstring const& id) {
+    return std::find(ids.begin(), ids.end(), id) != ids.end();
+}
+// [end app identity]
+
+bool ButtonIsLeftSide(FrameworkElement const& element) {
+    return !IsFixedRight(ButtonKey(element));
+}
+
+// Traverse the taskbar XAML tree to find the native tray, even when its
+// structure changes. Widget positions are handled separately below.
 FrameworkElement FindNamedDescendant(FrameworkElement const& node,
                                      wchar_t const* name, int depth = 0) {
     if (!node || depth > 12) return nullptr;
@@ -949,73 +1182,412 @@ FrameworkElement CachedNamedDescendant(FrameworkElement const& content,
     return found;
 }
 
-// Use the same locator for the periodic observer and the layout planner.
-// SystemTrayFrame is sometimes nested in the Windows 11 XAML content tree.
+FrameworkElement FindNativeTrayFrame(FrameworkElement const& content) {
+    auto tray = CachedNamedDescendant(content, L"SystemTrayFrame", g_traySearch);
+    if (!tray) tray = FindDirectChildByClass(content, L"SystemTray.SystemTrayFrame");
+    return tray;
+}
+
+// Recent taskbar layouts may put the tray inside a repeater item. Never
+// treat the item containing the native tray as an app or system button.
+FrameworkElement TrayHostInRepeater(FrameworkElement const& tray,
+                                     FrameworkElement const& repeater) {
+    if (!tray || !repeater || tray.XamlRoot() != repeater.XamlRoot()) return nullptr;
+    auto node = tray.as<DependencyObject>();
+    for (unsigned depth = 0; node && depth < 24; ++depth) {
+        auto parent = media::VisualTreeHelper::GetParent(node);
+        if (parent == repeater) return node.try_as<FrameworkElement>();
+        if (!parent || node == repeater) break;
+        node = parent;
+    }
+    return nullptr;
+}
+
+// A real right-docked Win32 notification window can independently corroborate
+// a transient XAML coordinate. Never mix screen pixels and XAML DIPs unless
+// the taskbar client width agrees with the XAML root's width and scale.
+double NativeTrayEdge(FrameworkElement const& content) {
+    HWND window = g_activeTaskbarWindow;
+    if (!window) return 0;
+    HWND trayWindow = FindWindowExW(window, nullptr, L"TrayNotifyWnd", nullptr);
+    if (!trayWindow || !IsWindowVisible(trayWindow)) return 0;
+    RECT client{}, trayRect{};
+    POINT origin{};
+    if (!GetClientRect(window, &client) || !ClientToScreen(window, &origin) ||
+        !GetWindowRect(trayWindow, &trayRect)) return 0;
+    auto root = content.XamlRoot();
+    double scale = root ? root.RasterizationScale() : 0.0;
+    double width = content.ActualWidth();
+    if (!std::isfinite(scale) || scale <= 0 || !std::isfinite(width) ||
+        std::abs((client.right - client.left) / scale - width) > 4.0)
+        return 0;
+    double left = (trayRect.left - origin.x) / scale;
+    double right = (trayRect.right - origin.x) / scale;
+    if (trayRect.top >= origin.y + client.bottom || trayRect.bottom <= origin.y ||
+        !std::isfinite(left) || left <= 0 || right <= left ||
+        std::abs(right - width) > 32.0) return 0;
+    return left;
+}
+
+// Both the poller and the planner must use the same validated boundary.
+// Do not accept a small X coordinate for a tray which is not right-docked:
+// that transient measurement used to trigger native/custom layout oscillation.
 double TrayEdgeForContent(FrameworkElement const& content,
                           FrameworkElement const& relativeTo) {
     double contentLeft = ElementX(content, relativeTo);
-    double contentWidth = content.ActualWidth();
-    double edge = contentLeft + contentWidth;
-    if (!std::isfinite(edge)) return 0;
-    auto tray = CachedNamedDescendant(content, L"SystemTrayFrame", g_traySearch);
-    if (!tray) tray = FindDirectChildByClass(content, L"SystemTray.SystemTrayFrame");
+    double width = content.ActualWidth();
+    double edge = contentLeft + width;
+    if (!std::isfinite(edge) || !std::isfinite(width) || width <= 0) return 0;
+    auto tray = FindNativeTrayFrame(content);
     if (tray && tray.Visibility() == Visibility::Visible) {
-        double tx = ElementX(tray, relativeTo);
-        if (std::isfinite(tx) && tx > contentLeft && tx <= edge)
-            edge = std::min(edge, tx);
+        double tx = ElementX(tray, content);
+        double tw = tray.ActualWidth();
+        // A large tray is legitimate if its right edge is still at the
+        // right side. A small tray temporarily near the left is not.
+        bool finite = std::isfinite(tx) && std::isfinite(tw) && tw > 0;
+        bool rightDocked = finite && tx > 0 && tx <= width &&
+            (tx >= width / 2.0 || std::abs(tx + tw - width) <= 48.0);
+        if (rightDocked) return contentLeft + tx;
+        double native = NativeTrayEdge(content);
+        if (native > 0) return contentLeft + native;
+        static thread_local ULONGLONG lastInvalidTrayLog = 0;
+        auto now = GetTickCount64();
+        if (!lastInvalidTrayLog || now - lastInvalidTrayLog >= 60000) {
+            lastInvalidTrayLog = now;
+            Wh_Log(L"TZ TRAY unverified geometry: x=%.1f width=%.1f rootWidth=%.1f; using native layout if no verified edge",
+                   tx, tw, width);
+        }
+        // A missing trustworthy boundary must not be interpreted as free
+        // space: that would allow apps to overlap a real notification area.
+        return 0;
     }
+    if (double native = NativeTrayEdge(content); native > 0)
+        return contentLeft + native;
+    // Secondary taskbars may legitimately have no notification area.
+    if (g_activeTaskbarWindow &&
+        g_activeTaskbarWindow == FindWindowW(L"Shell_TrayWnd", nullptr))
+        return 0;
     return edge;
 }
 
-// The hardware monitor chooses its own X position. Respect its ACTUAL
-// occupied interval once stable, rather than assuming a width reservation
-// forces another mod to move. Until its X is stable, retain the predictable
-// reserved slot to avoid a transient drift into the middle on startup.
-double FixedRightEdge(FrameworkElement const& content,
-                      FrameworkElement const& relativeTo) {
-    double contentLeft = ElementX(content, relativeTo);
-    if (!std::isfinite(contentLeft)) return 0;
-    double trayEdge = TrayEdgeForContent(content, relativeTo);
-    if (!std::isfinite(trayEdge) || trayEdge <= contentLeft) return contentLeft;
-    double widgetWidth = 0, widgetX = 0;
-    bool useActualX = false;
-    auto frame = FindDirectChildByClass(content, L"Taskbar.TaskbarFrame");
-    auto grid = frame ? FindDirectChildByName(frame, L"RootGrid") : nullptr;
-    auto monitor = grid ? FindDirectChildByName(grid, L"WindhawkTaskbarSystemInfo") : nullptr;
-    if (monitor && monitor.Visibility() == Visibility::Visible) {
-        widgetWidth = monitor.ActualWidth();
-        if (!std::isfinite(widgetWidth) || widgetWidth <= 2) widgetWidth = monitor.Width();
-        if (!std::isfinite(widgetWidth) || widgetWidth <= 2) widgetWidth = 0;
-        if (widgetWidth > 2) {
-            widgetX = ElementX(monitor, relativeTo);
-            useActualX = std::isfinite(widgetX) && widgetX >= contentLeft &&
-                         widgetX + widgetWidth <= contentLeft + content.ActualWidth() + 2;
+// Only explicitly identified widgets are eligible to reserve space. The
+// previous generic tree walk was unsafe: other taskbar mods create overlays
+// whose XAML rectangle stays at the frame origin while a Composition transform
+// renders them on top of app buttons. Those are NOT layout obstacles.
+//
+// System Info is auto-detected. It has its OWN placement solver and can sit
+// anywhere in the taskbar: never pretend that its measured width occupies
+// a slot directly before the tray. Read its actual XAML rectangle after the
+// other mod applies its Margin.Left, then avoid that rectangle. Invalid or
+// out-of-bounds measurements are ignored, never converted into a fabricated
+// reservation. The per-taskbar poller remeasures when placement changes.
+// Additional widgets can be configured by exact XAML Name.
+bool IsUsableReservedWidget(FrameworkElement const& element,
+                            FrameworkElement const& root, double maxWidth,
+                            double maxHeight) {
+    if (!element || element.Visibility() != Visibility::Visible ||
+        element.Opacity() < 0.05) return false;
+    double width = element.ActualWidth();
+    double height = element.ActualHeight();
+    if (!std::isfinite(width) || width < 8 || width > maxWidth ||
+        !std::isfinite(height) || height < 8 || height > maxHeight * 1.5)
+        return false;
+    // Never accept an overlay that is part of the app list or system tray,
+    // including when it happens to carry a user-configured element name.
+    auto parent = element.as<DependencyObject>();
+    for (int depth = 0; parent && depth < 24; ++depth) {
+        if (parent == root) return true;
+        if (auto fe = parent.try_as<FrameworkElement>()) {
+            auto name = fe.Name();
+            if (name == L"TaskbarFrameRepeater" ||
+                name == L"SystemTrayFrame" ||
+                name == L"BlobShape" || name == L"WindhawkDotStack" ||
+                winrt::get_class_name(fe) == L"SystemTray.SystemTrayFrame")
+                return false;
         }
+        parent = media::VisualTreeHelper::GetParent(parent);
     }
-    auto it = g_widgetWatches.find(g_activeTaskbarWindow);
-    ULONGLONG now = GetTickCount64();
-    if (it != g_widgetWatches.end()) {
-        auto& watch = it->second;
-        // Brief XAML reconstruction/collapse is not an instruction to remove
-        // the reservation immediately; keep the last known valid width.
-        if (widgetWidth <= 2 && watch.lastGoodWidth > 2 &&
-            now - watch.lastGoodTick < 1800) {
-            widgetWidth = watch.lastGoodWidth;
-            useActualX = false;
-        }
-    }
-    double right = trayEdge - (widgetWidth > 2 ? widgetWidth + 6 : 0);
-    if (useActualX && it != g_widgetWatches.end()) {
-        auto const& watch = it->second;
-        // An X-only animation is not used as an anchor until two timer
-        // samples have agreed. Stable unexpected placement is an obstacle.
-        if (watch.stableSamples >= 2 && watch.stableX > 0 &&
-            widgetX < right - 10) {
-            right = std::min(right, widgetX - 6);
-        }
-    }
-    return std::clamp(right, contentLeft, trayEdge);
+    return false;
 }
+
+// An advanced widget name must never resolve inside a task button template
+// or the system tray. Also reject decorative overlays which have no reserved
+// taskbar space. Keep searching after an unusable name match: another valid
+// element with the same Name may be inserted later in RootGrid.
+FrameworkElement FindReservedWidgetByName(
+        FrameworkElement const& node, FrameworkElement const& root,
+        std::wstring const& requested, double maxWidth, double maxHeight,
+        int depth = 0) {
+    if (!node || depth > 16) return nullptr;
+    auto name = node.Name();
+    if (name == L"TaskbarFrameRepeater" || name == L"SystemTrayFrame" ||
+        name == L"BlobShape" || name == L"WindhawkDotStack" ||
+        winrt::get_class_name(node) == L"SystemTray.SystemTrayFrame")
+        return nullptr;
+    if (node != root && name == requested.c_str() &&
+        IsUsableReservedWidget(node, root, maxWidth, maxHeight))
+        return node;
+    int count = media::VisualTreeHelper::GetChildrenCount(node);
+    for (int i = 0; i < count; ++i) {
+        auto child = media::VisualTreeHelper::GetChild(node, i)
+                         .try_as<FrameworkElement>();
+        if (auto match = FindReservedWidgetByName(
+                child, root, requested, maxWidth, maxHeight, depth + 1))
+            return match;
+    }
+    return nullptr;
+}
+
+// Cache only verified named widgets. Invalid, detached, or renamed elements
+// are removed and rediscovered, so rebuilding one monitor can't reuse the
+// widget from another monitor or from an obsolete XAML subtree.
+FrameworkElement CachedReservedWidgetByName(
+        FrameworkElement const& content, FrameworkElement const& root,
+        std::wstring const& name, double maxWidth, double maxHeight) {
+    BoundaryWatch* watch = nullptr;
+    auto owner = g_boundaryWatches.find(g_activeTaskbarWindow);
+    if (owner != g_boundaryWatches.end() &&
+        owner->second.content.get() == content)
+        watch = &owner->second;
+    if (watch) {
+        auto cached = watch->namedWidgets.find(name);
+        if (cached != watch->namedWidgets.end()) {
+            auto element = cached->second.get();
+            if (element && element.Name() == name &&
+                IsUsableReservedWidget(element, root, maxWidth, maxHeight))
+                return element;
+            watch->namedWidgets.erase(cached);
+        }
+    }
+    auto element = FindReservedWidgetByName(
+        root, root, name, maxWidth, maxHeight);
+    if (watch && element) watch->namedWidgets[name] = element;
+    return element;
+}
+
+std::vector<HorizontalSpan> CollectExternalSpans(FrameworkElement const& content) {
+    std::vector<HorizontalSpan> spans;
+    if (!content) return spans;
+    double width = content.ActualWidth(), height = content.ActualHeight();
+    if (!std::isfinite(width) || !std::isfinite(height) ||
+        width < 100 || height < 16) return spans;
+    auto tree = FindTaskbarTree(content, g_activeTaskbarWindow);
+    auto root = tree.grid;
+    if (!root) return spans;
+    double tray = TrayEdgeForContent(content, content);
+    if (!std::isfinite(tray) || tray <= 0 || tray > width) return spans;
+
+    // Read the real widget rectangle, but preserve a previously verified
+    // right-docked slot while the system tray is changing width. Otherwise
+    // the external widget can jump to the left of the icons, making our right
+    // zone reclaim the empty slot, which sends the widget to the right again.
+    // With extra containers, the RootGrid nearest to the app list may differ
+    // from TaskbarFrame's own RootGrid, which is where that mod attaches.
+    auto monitorRoot = root;
+    auto monitor = FindDirectChildByName(root, L"WindhawkTaskbarSystemInfo");
+    if (!monitor) {
+        auto frameGrid = FindDirectChildByName(tree.frame, L"RootGrid");
+        if (frameGrid && frameGrid != root) {
+            monitor = FindDirectChildByName(frameGrid,
+                                            L"WindhawkTaskbarSystemInfo");
+            if (monitor) monitorRoot = frameGrid;
+        }
+    }
+    bool hasMonitor = false;
+    HorizontalSpan monitorSpan{};
+    if (IsUsableReservedWidget(monitor, monitorRoot,
+            std::min(650.0, width * 0.60), height)) {
+        try {
+            double left = ElementX(monitor, content);
+            double right = left + monitor.ActualWidth();
+            if (std::isfinite(left) && std::isfinite(right) &&
+                left >= -0.5 && right > left + 8.0 &&
+                right <= tray + 0.5) {
+                monitorSpan = {std::max(0.0, left), right};
+                hasMonitor = true;
+            }
+        } catch (...) {
+            // Do not trust a detached XAML element's old position.
+        }
+    }
+
+    auto owner = g_boundaryWatches.find(g_activeTaskbarWindow);
+    BoundaryWatch* watch = owner != g_boundaryWatches.end() &&
+        owner->second.content.get() == content ? &owner->second : nullptr;
+    auto& ui = Ui();
+    ULONGLONG now = GetTickCount64();
+    bool useProjectedDock = false;
+    if (watch) {
+        // A real tray change starts a short handover. Do not start it for a
+        // widget-only move; manual widget positioning must remain possible.
+        if (watch->rightDockTracked &&
+            std::abs(tray - watch->rightDockObservedTray) > 1.0) {
+            watch->rightDockObservedTray = tray;
+            watch->rightDockHoldUntil = now + 2600;
+            Wh_Log(L"Taskbar %p: tray moved; holding right widget slot",
+                   g_activeTaskbarWindow);
+        }
+
+        bool actualRightDocked = false;
+        if (hasMonitor) {
+            double trailing = tray - monitorSpan.right;
+            bool afterRightApps = !ui.geometryInitialized ||
+                ui.lastRightGroupWidth <= 0 ||
+                monitorSpan.left >= ui.lastRightBound - 3.0;
+            actualRightDocked = afterRightApps &&
+                monitorSpan.left >= width * 0.45 &&
+                trailing >= -0.5 && trailing <= 100.0;
+        }
+
+        if (actualRightDocked && now >= watch->rightDockHoldUntil) {
+            // Update the anchor only when the handover has ended. A native
+            // tray expansion may briefly make the *old* widget coordinates
+            // appear valid with a smaller trailing gap. Accepting that gap
+            // would erase the displacement we need to anticipate.
+            watch->rightDockTracked = true;
+            watch->rightDockWidth = monitorSpan.right - monitorSpan.left;
+            watch->rightDockTrailingGap = std::max(0.0, tray - monitorSpan.right);
+            watch->rightDockObservedTray = tray;
+        }
+
+        if (watch->rightDockTracked &&
+            now < watch->rightDockHoldUntil) {
+            double predictedRight = tray - watch->rightDockTrailingGap;
+            double predictedLeft = predictedRight - watch->rightDockWidth;
+            // If there genuinely isn't enough space for the existing zones
+            // and the widget, use the normal safe layout fallback instead of
+            // manufacturing a reservation that cannot be honored.
+            bool fits = predictedLeft >= 0.0 &&
+                        predictedRight <= tray + 0.5;
+            if (fits && ui.geometryInitialized) {
+                double minimumStart = ui.lastLeftBound +
+                    ui.lastLeftGroupWidth + ui.lastRightGroupWidth + 12.0;
+                fits = predictedLeft >= minimumStart - 1.0;
+            }
+            if (fits) {
+                monitorSpan = {predictedLeft, predictedRight};
+                useProjectedDock = true;
+            } else {
+                watch->rightDockHoldUntil = 0;
+                watch->rightDockTracked = false;
+                Wh_Log(L"Taskbar %p: no room for right widget reservation",
+                       g_activeTaskbarWindow);
+            }
+        } else if (!actualRightDocked && watch->rightDockTracked) {
+            // A stable/manual move to the middle or left is still supported.
+            watch->rightDockTracked = false;
+            watch->rightDockHoldUntil = 0;
+        }
+    }
+    if (hasMonitor || useProjectedDock)
+        spans.push_back(monitorSpan);
+
+    std::vector<std::wstring> customNames;
+    {
+        std::lock_guard<std::mutex> lock(g_reservedWidgetNamesMutex);
+        customNames = g_reservedWidgetNames;
+    }
+    // Drop names removed in settings so the per-window cache stays bounded.
+    if (auto watch = g_boundaryWatches.find(g_activeTaskbarWindow);
+        watch != g_boundaryWatches.end() && watch->second.content.get() == content) {
+        for (auto it = watch->second.namedWidgets.begin();
+             it != watch->second.namedWidgets.end();) {
+            if (std::find(customNames.begin(), customNames.end(), it->first) ==
+                customNames.end())
+                it = watch->second.namedWidgets.erase(it);
+            else
+                ++it;
+        }
+    }
+    for (auto const& name : customNames) {
+        auto element = CachedReservedWidgetByName(content, root, name,
+            std::min(650.0, width * 0.60), height);
+        if (!element) continue;
+        try {
+            double x = ElementX(element, content);
+            double w = element.ActualWidth();
+            if (std::isfinite(x) && x >= 0 && x + w <= tray + 0.5)
+                spans.push_back({x, x + w});
+        } catch (...) { /* Detaching widget: skip this sample. */ }
+    }
+
+    std::sort(spans.begin(), spans.end(), [](auto const& a, auto const& b) {
+        return a.left < b.left || (a.left == b.left && a.right < b.right);
+    });
+    std::vector<HorizontalSpan> merged;
+    for (auto const& span : spans) {
+        if (!merged.empty() && span.left <= merged.back().right + 0.5)
+            merged.back().right = std::max(merged.back().right, span.right);
+        else
+            merged.push_back(span);
+    }
+    return merged;
+}
+
+// Preserve the last measured widget for a short XAML detach/rebuild only.
+// The identity and screen width must still match this taskbar; reconnecting a
+// monitor or changing resolution must never reuse a different monitor's area.
+std::vector<HorizontalSpan> EffectiveExternalSpans(FrameworkElement const& content) {
+    auto found = g_boundaryWatches.find(g_activeTaskbarWindow);
+    if (found == g_boundaryWatches.end() || found->second.content.get() != content)
+        return CollectExternalSpans(content);
+    auto const& watch = found->second;
+    ULONGLONG now = GetTickCount64();
+    // A native tray width change must move the reserved right-side widget
+    // slot *before* the other mod can flee from the newly crowded area. The
+    // reservation is projected using the last verified right-docked width
+    // and trailing gap. Ordinary widget-only movement uses accepted samples.
+    if (watch.rightDockTracked) {
+        double liveTray = TrayEdgeForContent(content, content);
+        if (std::isfinite(liveTray) && liveTray > 0 &&
+            (std::abs(liveTray - watch.rightDockObservedTray) > 1.0 ||
+             now < watch.rightDockHoldUntil))
+            return CollectExternalSpans(content);
+    }
+    if (watch.observed &&
+        std::abs(watch.lastScanContentWidth - content.ActualWidth()) < 1)
+        return watch.spans;
+    return RetainTransientSpans(content, watch, CollectExternalSpans(content), now);
+}
+
+// Pack whole zones into the nearest free space, never placing individual app
+// buttons across a third-party widget. An obstruction not touching either
+// zone remains untouched; when a zone grows into it, move the whole group.
+// This routine is deliberately independent from XAML and testable with spans.
+bool ResolveAvailableZoneBounds(double leftWidth, double rightWidth,
+                                std::vector<HorizontalSpan> const& obstacles,
+                                double& leftEdge, double& rightEdge,
+                                double leftClearance = 6.0,
+                                double rightClearance = 6.0) {
+    if (!std::isfinite(leftEdge) || !std::isfinite(rightEdge) ||
+        !std::isfinite(leftWidth) || !std::isfinite(rightWidth) ||
+        leftWidth < 0 || rightWidth < 0) return false;
+    auto overlaps = [](double a, double b, double c, double d) {
+        return a < d - 0.5 && c < b - 0.5;
+    };
+    for (size_t attempt = 0; attempt <= obstacles.size(); ++attempt) {
+        bool moved = false;
+        for (auto const& obstacle : obstacles) {
+            if (!std::isfinite(obstacle.left) || !std::isfinite(obstacle.right) ||
+                obstacle.right <= obstacle.left) continue;
+            if (leftWidth > 0 && overlaps(leftEdge, leftEdge + leftWidth,
+                    obstacle.left - leftClearance, obstacle.right + leftClearance)) {
+                leftEdge = std::max(leftEdge, obstacle.right + leftClearance);
+                moved = true;
+            }
+            if (rightWidth > 0 && overlaps(rightEdge - rightWidth, rightEdge,
+                    obstacle.left - rightClearance, obstacle.right + rightClearance)) {
+                rightEdge = std::min(rightEdge, obstacle.left - rightClearance);
+                moved = true;
+            }
+        }
+        if (leftEdge + leftWidth > rightEdge - rightWidth + 0.05)
+            return false;
+        if (!moved) return true;
+    }
+    return false; // An unstable/cyclic geometry falls back to Windows.
+}
+
 
 std::wstring ReadStoredString(wchar_t const* key) {
     std::vector<wchar_t> buffer(65536, L'\0');
@@ -1231,6 +1803,40 @@ void RememberRightId(std::vector<std::wstring>& ids,
     if (std::find(ids.begin(), ids.end(), id) == ids.end()) ids.push_back(id);
 }
 
+// [saved ids]
+// Older versions could save per-window IDs created by the grouping mod. Fold
+// them into the base ID. State without such entries is left exactly as saved.
+// A saved base ID wins over its per-window variants; otherwise a right-zone
+// variant wins, because only dragging puts an ID there.
+void NormalizeGroupedIds(PersistedAppState& state) {
+    auto hasSuffix = [](std::vector<std::wstring> const& ids) {
+        return std::any_of(ids.begin(), ids.end(), [](auto const& id) {
+            return StripGroupingSuffix(id) != id;
+        });
+    };
+    if (!hasSuffix(state.leftOrder) && !hasSuffix(state.rightOrder)) return;
+    auto contains = [](std::vector<std::wstring> const& ids,
+                       std::wstring const& id) {
+        return std::find(ids.begin(), ids.end(), id) != ids.end();
+    };
+    std::vector<std::wstring> right, left;
+    for (auto const& id : state.rightOrder) {
+        auto base = StripGroupingSuffix(id);
+        if (contains(state.leftOrder, base) &&
+            !contains(state.rightOrder, base)) continue;
+        if (!contains(right, base)) right.push_back(base);
+    }
+    for (auto const& id : state.leftOrder) {
+        auto base = StripGroupingSuffix(id);
+        if (!contains(right, base) && !contains(left, base))
+            left.push_back(base);
+    }
+    state.leftOrder = std::move(left);
+    state.rightOrder = right;
+    state.rightIds = std::move(right);
+}
+// [end saved ids]
+
 void EnsureSharedStateLoadedLocked() {
     if (g_sharedLoaded) return;
     g_sharedLoaded = true;
@@ -1239,6 +1845,7 @@ void EnsureSharedStateLoadedLocked() {
     wchar_t active = 0;
     auto marker = ReadStoredString(L"fixed-sides-commit-v3");
     if (ReadBankState(marker, next, rebuilt, active)) {
+        NormalizeGroupedIds(next);
         g_sharedState = std::move(next);
         g_committedRecord = std::move(rebuilt);
         g_committedBankManifest = marker;
@@ -1248,6 +1855,7 @@ void EnsureSharedStateLoadedLocked() {
     marker = ReadStoredString(L"fixed-sides-backup-v3");
     if (ReadBankState(marker, next, rebuilt, active)) {
         Wh_Log(L"Restored last valid segmented taskbar preferences");
+        NormalizeGroupedIds(next);
         g_sharedState = std::move(next);
         g_committedRecord = std::move(rebuilt);
         g_committedBankManifest = marker;
@@ -1265,6 +1873,60 @@ void LoadAppOrders() {
     ui.rightAppOrder = g_sharedState.rightOrder;
     ui.rightAppIds = g_sharedState.rightIds;
     ui.stateRevision = g_sharedRevision;
+}
+
+// Remember each button's AppID for short XAML gaps and for change detection,
+// and log identity changes. Nothing here is saved, and no identity is ever
+// guessed from titles, executables or positions.
+void TrackAppIdentities(std::vector<FrameworkElement> const& children) {
+    auto& ui = Ui();
+    ULONGLONG now = GetTickCount64();
+    std::unordered_map<void*, RememberedAppId> remembered;
+    std::vector<std::wstring> nativeIds;
+    ui.plannedIds.clear();
+    for (auto const& child : children) {
+        if (!IsTaskButton(child)) continue;
+        auto id = ButtonAppId(child);
+        ui.plannedIds.emplace_back(child, id);
+        void* key = winrt::get_abi(child);
+        auto old = ui.rememberedIds.find(key);
+        bool sameElement = old != ui.rememberedIds.end() &&
+                           old->second.element.get() == child;
+        if (!id.empty()) {
+            if (sameElement && old->second.id != id)
+                Wh_Log(L"TZ ID container %p changed '%ls' -> '%ls'", key,
+                       old->second.id.c_str(), id.c_str());
+            remembered[key] = RememberedAppId{child, id, now};
+        } else if (sameElement && now - old->second.seen < kEmptyAppIdGraceMs) {
+            Wh_Log(L"TZ ID container %p temporarily empty, keeping '%ls'",
+                   key, old->second.id.c_str());
+            id = old->second.id;
+            remembered[key] = old->second;
+        }
+        nativeIds.push_back(StripGroupingSuffix(id));
+    }
+    ui.rememberedIds.swap(remembered);
+
+    if (nativeIds != ui.nativeIds) {
+        for (size_t i = 0; i < ui.nativeIds.size(); ++i)
+            if (!ContainsId(nativeIds, ui.nativeIds[i]))
+                Wh_Log(L"TZ ID gone: slot %zu '%ls'", i,
+                       ui.nativeIds[i].c_str());
+        for (size_t i = 0; i < nativeIds.size(); ++i)
+            if (!ContainsId(ui.nativeIds, nativeIds[i]))
+                Wh_Log(L"TZ ID new: slot %zu '%ls'", i,
+                       nativeIds[i].c_str());
+        ui.nativeIds = nativeIds;
+    }
+}
+
+// XAML does not necessarily arrange again when only an AutomationId changes.
+bool AppIdentityChanged(TaskbarUiState const& ui) {
+    for (auto const& [reference, planned] : ui.plannedIds) {
+        auto element = reference.get();
+        if (element && ButtonAppId(element) != planned) return true;
+    }
+    return false;
 }
 
 // Storage is committed by a bounded taskbar HWND timer, not by a background
@@ -1418,48 +2080,103 @@ void MergeVisibleAppOrder(std::vector<std::wstring>& saved,
     while (next < unique.size()) RememberApp(saved, unique[next++]);
 }
 
+// [icon spacing]
+constexpr double kLabeledButtonWidth = 60.0;  // wider buttons carry a label
+constexpr double kIconSideClearance = 2.0;
+constexpr double kDefaultIconWidth = 24.0;
+
+// How much narrower a centred-icon button may become without cutting the icon.
+double MaxButtonReduction(double nativeWidth, double iconWidth) {
+    if (!std::isfinite(nativeWidth) || nativeWidth > kLabeledButtonWidth)
+        return 0;
+    if (!std::isfinite(iconWidth) || iconWidth <= 0)
+        iconWidth = kDefaultIconWidth;
+    return std::max(0.0,
+        (nativeWidth - iconWidth) / 2.0 - kIconSideClearance);
+}
+
+// Recover the native width of a button this mod may currently be narrowing.
+// A measurement equal to the narrowed slot is our own result, not a new size.
+double ResolveNativeWidth(double measured, double previousNative,
+                          double previousSlot) {
+    if (previousNative > 0 && previousSlot > 0 &&
+        previousSlot < previousNative &&
+        std::abs(measured - previousSlot) <= 1.0)
+        return previousNative;
+    return measured;
+}
+
+double ZoneContentWidth(std::vector<double> const& widths, double gap) {
+    double total = 0;
+    unsigned count = 0;
+    for (double width : widths) {
+        if (width <= 0) continue;
+        total += width;
+        ++count;
+    }
+    return count > 1 ? total + gap * (count - 1) : total;
+}
+// [end icon spacing]
+
+double IconWidthOf(FrameworkElement const& button) {
+    auto icon = FindNamedDescendant(button, L"Icon", 0);
+    return icon && icon.Visibility() == Visibility::Visible
+        ? icon.ActualWidth() : 0.0;
+}
+
+// The width a button occupies in the current plan (narrowed or native).
+double SlotWidth(FrameworkElement const& element) {
+    auto& widths = Ui().slotWidths;
+    auto found = widths.find(winrt::get_abi(element));
+    return found != widths.end() ? found->second : ElementWidth(element);
+}
+
 struct Placement {
     winrt::weak_ref<FrameworkElement> element;
     float x;
-    double scale;
     double measuredWidth;
+    float width;  // 0 keeps the width Windows chose
 };
 // Built before the original ArrangeOverride. The nested Arrange hook only
 // performs an ABI identity lookup; it never traverses or mutates the tree.
 thread_local std::unordered_map<void*, Placement> g_arrangePlan;
 thread_local bool g_useArrangePlan = false;
 
-void PlanElement(FrameworkElement const& element, double x, double scale) {
+void PlanElement(FrameworkElement const& element, double x, double width = 0) {
     // Rect.X is the margin-box origin, not the rendered border-box origin.
     g_arrangePlan.emplace(winrt::get_abi(element),
-                          Placement{element, static_cast<float>(x), scale,
-                                    element.ActualWidth()});
+                          Placement{element, static_cast<float>(x),
+                                    element.ActualWidth(),
+                                    static_cast<float>(width)});
 }
 
 bool BuildLayoutPlan(FrameworkElement const& knownRepeater) {
     g_arrangePlan.clear();
     Ui().layoutValid = false;
     Ui().slots.clear();
+    Ui().slotWidths.clear();
     try {
         auto repeater = knownRepeater ? knownRepeater : GetTaskbarRepeater();
         auto content = repeater && repeater.XamlRoot()
                            ? repeater.XamlRoot().Content().try_as<FrameworkElement>()
                            : nullptr;
         if (!repeater || !content) {
-            RestoreVisualStatesForWindow(g_activeTaskbarWindow);
+            LogDiscoveryFailure(10, L"layout content not ready", g_activeTaskbarWindow);
             return false;
         }
-        // Vertical or malformed layouts are left to Windows, including scale.
+        // Vertical or malformed layouts are left to Windows.
         if (content.ActualWidth() < content.ActualHeight() * 2.0) {
-            RestoreVisualStatesForWindow(g_activeTaskbarWindow);
+            LogDiscoveryFailure(10, L"layout content is vertical or malformed", g_activeTaskbarWindow);
             return false;
         }
         double repeaterX = ElementX(repeater, content);
-        EnsureWidgetWatch(content);
+        EnsureBoundaryWatch(content);
 
         LoadAppOrders();
+        auto nativeTray = FindNativeTrayFrame(content);
+        auto trayHost = TrayHostInRepeater(nativeTray, repeater);
         auto children = RepeaterElements(repeater);
-        PruneVisualStates(children);
+        TrackAppIdentities(children);
         std::vector<ButtonInfo> buttons;
         std::vector<FrameworkElement> systemButtons;
         FrameworkElement overflow{nullptr};
@@ -1468,9 +2185,24 @@ bool BuildLayoutPlan(FrameworkElement const& knownRepeater) {
             if (child.Visibility() != Visibility::Visible) {
                 continue;
             }
-            if (IsTaskButton(child) && ElementWidth(child) > 0) {
-                auto id = ButtonAppId(child);
-                buttons.push_back({child, ElementWidth(child),
+            // Some Windows layouts expose the notification area through
+            // TaskbarExtensionElement. It is not the Search button, even
+            // when its outer runtime class is identical.
+            if (child == trayHost || child == nativeTray ||
+                (winrt::get_class_name(child) == L"Taskbar.TaskbarExtensionElement" &&
+                 FindNamedDescendant(child, L"SystemTrayFrame"))) {
+                static thread_local bool loggedTrayHost = false;
+                if (!loggedTrayHost) {
+                    loggedTrayHost = true;
+                    Wh_Log(L"TZ TRAY native repeater item excluded: class=%ls name=%ls",
+                           winrt::get_class_name(child).c_str(), child.Name().c_str());
+                }
+                continue;
+            }
+            double nativeWidth = ElementWidth(child);
+            if (IsTaskButton(child) && nativeWidth > 0) {
+                auto id = ButtonKey(child);
+                buttons.push_back({child, nativeWidth,
                                    !IsFixedRight(id), std::move(id)});
             } else if (GetSystemButtonKind(child) != SystemButtonKind::None) {
                 systemButtons.push_back(child);
@@ -1491,12 +2223,24 @@ bool BuildLayoutPlan(FrameworkElement const& knownRepeater) {
         std::stable_sort(systemButtons.begin(), systemButtons.end(),
             [&](auto const& a, auto const& b) { return rank(a) < rank(b); });
 
-        double leftEdge = g_settings.leftPadding.load();
+        auto obstacles = EffectiveExternalSpans(content);
+        double leftEdge = 0.0;
+        double systemStart = 0, systemWidth = 0;
         if (g_settings.systemButtonsLeft.load()) {
+            for (auto const& button : systemButtons)
+                systemWidth += SystemButtonWidth(button);
+            // External left-anchored elements may precede the Start button.
+            // Move the whole native button group, not its individual icons.
+            double unusedRight = content.ActualWidth();
+            if (!ResolveAvailableZoneBounds(systemWidth, 0, obstacles,
+                                            leftEdge, unusedRight)) {
+                return false;
+            }
+            systemStart = leftEdge;
             for (auto const& button : systemButtons) {
                 double width = SystemButtonWidth(button);
                 if (width > 0) {
-                    PlanElement(button, leftEdge - repeaterX, 1.0);
+                    PlanElement(button, leftEdge - repeaterX);
                     leftEdge += width;
                 }
             }
@@ -1505,20 +2249,30 @@ bool BuildLayoutPlan(FrameworkElement const& knownRepeater) {
                 // Widgets are reserved separately, on their actual side.
                 if (GetSystemButtonKind(button) == SystemButtonKind::Widgets) continue;
                 double width = SystemButtonWidth(button);
-                if (width <= 0) {
-                    continue;
-                }
+                if (width <= 0) continue;
                 double nativeX = repeaterX + button.ActualOffset().x;
-                leftEdge = std::max(leftEdge,
-                                    nativeX + width);
+                leftEdge = std::max(leftEdge, nativeX + width);
             }
         }
 
-        double rightEdge = FixedRightEdge(content, content);
-        if (!g_settings.systemButtonsLeft.load()) {
-            ReserveNativeWidgets(content, leftEdge, rightEdge);
+        // Windows owns the tray. Only verified widget reservations change
+        // these edges; random XAML decorations must never move app zones.
+        double rightEdge = TrayEdgeForContent(content, content);
+        if (!std::isfinite(rightEdge) || rightEdge <= 0) {
+            g_arrangePlan.clear();
+            return false;
         }
-        leftEdge += g_settings.runningGap.load();
+        if (auto found = g_boundaryWatches.find(g_activeTaskbarWindow);
+            found != g_boundaryWatches.end() &&
+            found->second.content.get() == content && found->second.observed) {
+            // Honor new tray space immediately when it becomes smaller to
+            // avoid overlap. Only release space on an expansion after the
+            // geometry watcher accepts the stable edge.
+            rightEdge = std::min(rightEdge, found->second.trayX);
+        }
+        double acceptedTrayX = rightEdge;
+        if (!g_settings.systemButtonsLeft.load())
+            ReserveNativeWidgets(content, leftEdge, rightEdge);
         rightEdge -= g_settings.trayGap.load();
 
         std::vector<ButtonInfo*> leftButtons;
@@ -1533,50 +2287,84 @@ bool BuildLayoutPlan(FrameworkElement const& knownRepeater) {
             leftButtons.push_back(&overflowInfo);
         }
 
-        double rightVisualScale =
-            g_settings.pinnedIconScale.load() / 100.0;
-        auto totalWidth = [](std::vector<ButtonInfo*> const& group) {
-            double total = 0;
-            for (auto item : group) total += item->width;
-            return total;
+        // Positive spacing adds a gap between slots. Negative spacing makes
+        // the slots narrower; hit rectangles never overlap in either case.
+        int leftSpacing = g_settings.leftIconSpacing.load();
+        int rightSpacing = g_settings.rightIconSpacing.load();
+        double leftGap = std::max(0, leftSpacing);
+        double rightGap = std::max(0, rightSpacing);
+        {
+            auto& state = Ui();
+            std::unordered_map<void*, NarrowedButton> narrowed;
+            state.slotWidths.clear();
+            for (auto& button : buttons) {
+                void* key = winrt::get_abi(button.element);
+                auto old = state.narrowed.find(key);
+                bool known = old != state.narrowed.end() &&
+                    old->second.element.get() == button.element;
+                double native = known
+                    ? ResolveNativeWidth(button.width, old->second.nativeWidth,
+                                         old->second.slotWidth)
+                    : button.width;
+                int spacing = button.leftSide ? leftSpacing : rightSpacing;
+                double slot = native;
+                if (spacing < 0) {
+                    slot -= std::min(double(-spacing), MaxButtonReduction(
+                        native, IconWidthOf(button.element)));
+                }
+                button.width = slot;
+                button.narrowedWidth = slot < native - 0.5 ? slot : 0;
+                button.nativeWidth = native;
+                // Keep one pass after narrowing ends, until XAML reports the
+                // native width again.
+                if (button.narrowedWidth > 0 ||
+                    (known && old->second.slotWidth < native - 0.5))
+                    narrowed[key] = NarrowedButton{button.element, native, slot};
+                state.slotWidths[key] = slot;
+            }
+            state.narrowed.swap(narrowed);
+        }
+
+        auto totalWidth = [](std::vector<ButtonInfo*> const& group, double gap) {
+            std::vector<double> widths;
+            for (auto item : group) widths.push_back(item->width);
+            return ZoneContentWidth(widths, gap);
         };
 
-        double leftWidth = totalWidth(leftButtons);
-        double rightWidth = totalWidth(rightButtons);
-        double requested = leftWidth + rightWidth;
-        double span = rightEdge - leftEdge;
-        // During a transient widget measurement its declared width can grow
-        // before its actual X position is updated by Taskbar System Info.
-        // Reuse the PREVIOUSLY SAFE right boundary for at most 1.8 seconds,
-        // but only when the real widget remains strictly to its right. This
-        // prevents the whole right group briefly dropping to the native middle
-        // layout due only to a provisional width measurement. Real crowding
-        // still falls back to Windows; never overlap another widget.
-        auto& stableUi = Ui();
-        if (std::isfinite(requested) && std::isfinite(span) &&
-            requested > span + 0.05 && stableUi.lastValidLayoutTick &&
-            GetTickCount64() - stableUi.lastValidLayoutTick < 1800 &&
-            stableUi.lastValidConfigEpoch == g_configEpoch.load() &&
-            stableUi.lastButtonCount == buttons.size() &&
-            std::abs(stableUi.lastContentWidth - content.ActualWidth()) < 1 &&
-            std::abs(stableUi.lastLeftBound - leftEdge) < 1 &&
-            stableUi.lastRightBound > rightEdge &&
-            requested <= stableUi.lastRightBound - leftEdge + 0.05) {
-            auto frame = FindDirectChildByClass(content, L"Taskbar.TaskbarFrame");
-            auto grid = frame ? FindDirectChildByName(frame, L"RootGrid") : nullptr;
-            auto monitor = grid
-                ? FindDirectChildByName(grid, L"WindhawkTaskbarSystemInfo") : nullptr;
-            if (monitor && monitor.Visibility() == Visibility::Visible) {
-                double widgetX = ElementX(monitor, content);
-                double trayX = TrayEdgeForContent(content, content);
-                if (std::isfinite(widgetX) && std::isfinite(trayX) &&
-                    stableUi.lastRightBound + 6 <= widgetX &&
-                    stableUi.lastRightBound + g_settings.trayGap.load() <= trayX) {
-                    rightEdge = stableUi.lastRightBound;
-                    span = rightEdge - leftEdge;
-                }
+        // A narrowed button can keep its native ActualWidth, with the excess
+        // only clipped. Other mods (Taskbar System Info) measure that size, so
+        // the last button of each zone still needs room for it. Without this
+        // it used up the clearance next to a widget, which then kept moving.
+        auto trailingOverhang = [](std::vector<ButtonInfo*> const& group) {
+            for (auto item = group.rbegin(); item != group.rend(); ++item) {
+                if ((*item)->width <= 0) continue;
+                return (*item)->narrowedWidth > 0
+                    ? (*item)->nativeWidth - (*item)->width : 0.0;
             }
+            return 0.0;
+        };
+        double rightOverhang = trailingOverhang(rightButtons);
+
+        double leftWidth = totalWidth(leftButtons, leftGap) +
+                           trailingOverhang(leftButtons);
+        double rightWidth = totalWidth(rightButtons, rightGap) + rightOverhang;
+        double requested = leftWidth + rightWidth;
+        if (!ResolveAvailableZoneBounds(leftWidth, rightWidth, obstacles,
+                                        leftEdge, rightEdge, 6.0,
+                                        std::max(6.0, double(g_settings.trayGap.load())))) {
+            auto& ui = Ui();
+            ui.layoutValid = false;
+            ULONGLONG now = GetTickCount64();
+            ui.lastCrowdingRetry = now;
+            if (!ui.lastCrowdingLog || now - ui.lastCrowdingLog > 30000) {
+                ui.lastCrowdingLog = now;
+                Wh_Log(L"Taskbar %p: blocked by occupied regions; native layout retained",
+                       g_activeTaskbarWindow);
+            }
+            g_arrangePlan.clear();
+            return false;
         }
+        double span = rightEdge - leftEdge;
         // Each native button has its own hit rectangle. Never overlap those
         // rectangles to fake more room: use Windows' native overflow layout.
         if (!std::isfinite(span) || span < 0 ||
@@ -1593,34 +2381,40 @@ bool BuildLayoutPlan(FrameworkElement const& knownRepeater) {
                 Wh_Log(L"Taskbar %p crowded: required %.1f DIP, available %.1f DIP; native layout retained",
                        g_activeTaskbarWindow, requested, span);
             }
-            RestoreVisualStatesForChildren(children);
             g_arrangePlan.clear();
             return false;
         }
         auto& ui = Ui();
         ui.leftStart = leftEdge - repeaterX;
         double x = leftEdge;
+        double leftItemEnd = leftEdge;
         for (auto item : leftButtons) {
-            PlanElement(item->element, x - repeaterX, 1.0);
+            PlanElement(item->element, x - repeaterX, item->narrowedWidth);
             if (!item->appId.empty())
                 ui.slots.push_back({item->appId, true, x - repeaterX, item->width});
-            x += item->width;
+            if (item->width <= 0) continue;
+            leftItemEnd = x + item->width;
+            x = leftItemEnd + leftGap;
         }
-        ui.leftEnd = x - repeaterX;
+        ui.leftEnd = leftItemEnd - repeaterX;
 
-        x = rightEdge;
+        double rightSlotsEnd = rightEdge - rightOverhang;
+        x = rightSlotsEnd;
+        bool hasItemOnTheRight = false;
         for (auto item = rightButtons.rbegin(); item != rightButtons.rend(); ++item) {
-            // Reserve the full native hit rectangle, even when an icon's
-            // drawing is scaled down. Otherwise hit areas overlap invisibly.
-            double nativeWidth = (*item)->width;
-            x -= nativeWidth;
-            PlanElement((*item)->element, x - repeaterX, rightVisualScale);
+            // The slot is the button's whole hit rectangle.
+            double slotWidth = (*item)->width;
+            if (slotWidth > 0 && hasItemOnTheRight) x -= rightGap;
+            x -= slotWidth;
+            if (slotWidth > 0) hasItemOnTheRight = true;
+            PlanElement((*item)->element, x - repeaterX, (*item)->narrowedWidth);
             if (!(*item)->appId.empty())
-                ui.slots.push_back({(*item)->appId, false, x - repeaterX, nativeWidth});
-            // Keep full-size hit rectangles even when the icon is scaled.
+                ui.slots.push_back({(*item)->appId, false, x - repeaterX, slotWidth});
         }
         ui.rightStart = x - repeaterX;
-        ui.rightEnd = rightEdge - repeaterX;
+        ui.rightEnd = rightSlotsEnd - repeaterX;
+        ui.leftGap = leftGap;
+        ui.rightGap = rightGap;
         double dpi = 1.0;
         if (auto root = repeater.XamlRoot()) dpi = root.RasterizationScale();
         // Stable order-insensitive identity fingerprint: reordering alone
@@ -1644,6 +2438,8 @@ bool BuildLayoutPlan(FrameworkElement const& knownRepeater) {
             changed(ui.lastRightBound, rightEdge) ||
             changed(ui.lastLeftGroupWidth, leftWidth) ||
             changed(ui.lastRightGroupWidth, rightWidth) ||
+            changed(ui.lastSystemStart, systemStart) ||
+            changed(ui.lastSystemWidth, systemWidth) ||
             changed(ui.lastDpi, dpi) ||
             ui.lastButtonCount != buttons.size() ||
             ui.lastButtonIdentity != buttonIdentity) {
@@ -1653,20 +2449,20 @@ bool BuildLayoutPlan(FrameworkElement const& knownRepeater) {
         ui.lastContentWidth = content.ActualWidth();
         ui.lastContentHeight = content.ActualHeight();
         ui.lastRepeaterX = repeaterX;
+        ui.lastTrayX = acceptedTrayX;
         ui.lastLeftBound = leftEdge;
         ui.lastRightBound = rightEdge;
         ui.lastLeftGroupWidth = leftWidth;
         ui.lastRightGroupWidth = rightWidth;
+        ui.lastSystemStart = systemStart;
+        ui.lastSystemWidth = systemWidth;
         ui.lastDpi = dpi;
         ui.lastButtonCount = buttons.size();
         ui.lastButtonIdentity = buttonIdentity;
-        ui.lastValidLayoutTick = GetTickCount64();
-        ui.lastValidConfigEpoch = g_configEpoch.load();
         ui.layoutValid = true;
         return true;
     } catch (...) {
         g_arrangePlan.clear();
-        RestoreVisualStatesForWindow(g_activeTaskbarWindow);
         Wh_Log(L"layout pass failed safely");
         return false;
     }
@@ -1700,6 +2496,10 @@ HRESULT WINAPI ElementArrange_Hook(void* self, winrt::Windows::Foundation::Rect 
                 auto found = g_arrangePlan.find(winrt::get_abi(element));
                 if (found != g_arrangePlan.end()) {
                     rect.X = found->second.x;
+                    // Only the layout slot (and so the hit area) gets narrower;
+                    // no element property is written, so nothing needs undoing.
+                    if (found->second.width > 0)
+                        rect.Width = found->second.width;
                     KeepDraggedSlot(element, rect);
                     arrangedElement = element;
                 }
@@ -1710,6 +2510,9 @@ HRESULT WINAPI ElementArrange_Hook(void* self, winrt::Windows::Foundation::Rect 
     }
     HRESULT result = ElementArrange_Original(self, rect);
     if (SUCCEEDED(result) && arrangedElement) {
+        static std::atomic<bool> loggedCustomArrange{false};
+        if (!loggedCustomArrange.exchange(true))
+            Wh_Log(L"Taskbar discovery: custom element arrangement applied");
         try { CompletePendingDrop(arrangedElement); } catch (...) {}
     }
     return result;
@@ -1727,9 +2530,11 @@ bool EnsureArrangeHook() {
     auto arrange = reinterpret_cast<ElementArrange_t>(vtable[92]);
     if (!WindhawkUtils::SetFunctionHook(arrange, ElementArrange_Hook,
                                       &ElementArrange_Original)) {
+        LogDiscoveryFailure(6, L"IUIElement::Arrange hook unavailable", g_activeTaskbarWindow);
         return false;
     }
     Wh_ApplyHookOperations();
+    Wh_Log(L"Taskbar discovery: IUIElement::Arrange hook installed");
     return true;
 }
 
@@ -1757,6 +2562,10 @@ HRESULT WINAPI ArrangeOverride_Hook(
         }
     } guard;
 
+    static std::atomic<bool> loggedArrange{false};
+    if (!loggedArrange.exchange(true))
+        Wh_Log(L"Taskbar discovery: ArrangeOverride entered");
+
     // A primary and a secondary taskbar have distinct XAML roots and layouts.
     // Compare the exact layout ABI identity instead of assuming one taskbar.
     HWND window = nullptr;
@@ -1765,7 +2574,10 @@ HRESULT WINAPI ArrangeOverride_Hook(
         winrt::Windows::Foundation::IUnknown caller{nullptr};
         winrt::copy_from_abi(caller, self);
         auto layout = caller.try_as<winrt::Microsoft::UI::Xaml::Controls::Layout>();
-        if (!layout) return ArrangeOverride_Original(self, context, size, resultSize);
+        if (!layout) {
+            LogDiscoveryFailure(7, L"ArrangeOverride caller is not a Layout", nullptr);
+            return ArrangeOverride_Original(self, context, size, resultSize);
+        }
         void* identity = winrt::get_abi(layout);
         if (auto cached = g_layoutOwners.find(identity); cached != g_layoutOwners.end()) {
             bool currentOwner = false;
@@ -1795,7 +2607,7 @@ HRESULT WINAPI ArrangeOverride_Hook(
                 continue;
             auto root = TaskbarXamlRoot(candidate);
             auto content = root ? root.Content().try_as<FrameworkElement>() : nullptr;
-            auto element = content ? FindTaskbarRepeater(content) : nullptr;
+            auto element = content ? FindTaskbarRepeater(content, candidate) : nullptr;
             auto repeater = element
                 ? element.try_as<winrt::Microsoft::UI::Xaml::Controls::ItemsRepeater>()
                 : nullptr;
@@ -1809,41 +2621,86 @@ HRESULT WINAPI ArrangeOverride_Hook(
             }
         }
     } catch (...) {
+        LogDiscoveryFailure(8, L"XAML layout owner lookup threw an exception", nullptr);
         return ArrangeOverride_Original(self, context, size, resultSize);
     }
-    if (!window) return ArrangeOverride_Original(self, context, size, resultSize);
+    if (!window) {
+        LogDiscoveryFailure(8, L"no matching taskbar layout owner", nullptr);
+        return ArrangeOverride_Original(self, context, size, resultSize);
+    }
     ScopedTaskbarContext taskbarContext(window);
     if (!EnsureTaskbarSubclass(window)) {
-        RestoreVisualStatesForWindow(window);
+        LogDiscoveryFailure(9, L"taskbar subclass unavailable", window);
         return ArrangeOverride_Original(self, context, size, resultSize);
     }
+    static std::atomic<bool> loggedLayoutOwner{false};
+    if (!loggedLayoutOwner.exchange(true))
+        Wh_Log(L"Taskbar discovery: taskbar layout identity verified (HWND %p)", window);
 
     bool planReady = false;
     try {
         if (EnsureArrangeHook()) {
             planReady = BuildLayoutPlan(arrangeRepeater);
             g_useArrangePlan = planReady;
-        } else {
-            RestoreVisualStatesForWindow(window);
         }
     } catch (...) {
         g_arrangePlan.clear();
         g_useArrangePlan = false;
-        RestoreVisualStatesForWindow(window);
     }
     HRESULT result = ArrangeOverride_Original(self, context, size, resultSize);
     g_useArrangePlan = false;
     if (g_settingsArrangeFollowup.exchange(false)) RequestRefreshAll();
     if (!g_unloading && planReady) {
-        try {
-            for (auto const& [key, placement] : g_arrangePlan) {
-                if (auto element = placement.element.get()) {
-                    ScaleElement(element, placement.scale);
-                    if (std::abs(element.ActualWidth() - placement.measuredWidth) > 0.05)
-                        RequestRefresh();
-                }
+        // Windows owns task button visuals. Keep the post-arrange checks
+        // but never change Scale or CenterPoint on protected XAML elements.
+        auto logPostArrangeError = [&](wchar_t const* phase, HRESULT hr) {
+            auto& ui = Ui();
+            ULONGLONG now = GetTickCount64();
+            if (!ui.lastPostArrangeErrorLog ||
+                now - ui.lastPostArrangeErrorLog >= 10000) {
+                ui.lastPostArrangeErrorLog = now;
+                Wh_Log(L"Post-arrange %ls failed on taskbar %p "
+                       L"(HRESULT 0x%08X)",
+                       phase, window, static_cast<unsigned int>(hr));
             }
+        };
+        winrt::Windows::UI::Xaml::XamlRoot expectedRoot{nullptr};
+        try {
+            if (arrangeRepeater) expectedRoot = arrangeRepeater.XamlRoot();
+        } catch (...) {
+            logPostArrangeError(L"root lookup", winrt::to_hresult());
+        }
+        for (auto const& [key, placement] : g_arrangePlan) {
+            FrameworkElement element{nullptr};
+            try {
+                element = placement.element.get();
+                if (!element) continue;
+                // The native Arrange call can detach/recycle a planned
+                // element before this post-arrange pass reaches it.
+                auto elementRoot = element.XamlRoot();
+                if (!elementRoot || !expectedRoot ||
+                    elementRoot != expectedRoot) continue;
+            } catch (...) {
+                logPostArrangeError(L"element root lookup",
+                                    winrt::to_hresult());
+                continue;
+            }
+            try {
+                if (std::abs(element.ActualWidth() -
+                             placement.measuredWidth) > 0.05) {
+                    RequestRefresh();
+                }
+            } catch (...) {
+                logPostArrangeError(L"width refresh",
+                                    winrt::to_hresult());
+            }
+        }
+        try {
             UpdateDragPreview();
+        } catch (...) {
+            logPostArrangeError(L"drag preview", winrt::to_hresult());
+        }
+        try {
             if (arrangeRepeater) {
                 for (auto const& child : RepeaterElements(arrangeRepeater)) {
                     if (IsTaskButton(child) && ElementWidth(child) > 0 &&
@@ -1854,7 +2711,7 @@ HRESULT WINAPI ArrangeOverride_Hook(
                 }
             }
         } catch (...) {
-            Wh_Log(L"Post-arrange scaling failed for one taskbar");
+            logPostArrangeError(L"button list check", winrt::to_hresult());
         }
     }
     return result;
@@ -1881,6 +2738,7 @@ struct SectionGesture {
     double minX = 0;
     double maxX = 0;
     double width = 0;
+    double sectionGap = 0;
     numerics::float3 translation{};
     float originalSlotX = 0;
     media::Animation::TransitionCollection transitions{nullptr};
@@ -1899,6 +2757,7 @@ struct PendingDrop {
     bool arranged = false;
     ULONGLONG started = 0;
     unsigned int stableSamples = 0;
+    double lastX = -1e9;  // last observed layout position
 };
 [[clang::no_destroy]] thread_local std::optional<PendingDrop> g_pendingDrop;
 thread_local HWND g_dropSettleWindow = nullptr;
@@ -1940,8 +2799,7 @@ void RestoreGestureVisual(SectionGesture const& gesture) {
         if (gesture.previewPrepared) {
             try {
                 // XAML Transitions alone do not disable Composition's
-                // reposition animations. Keep the drag offset until layout
-                // has reached its destination, then remove it without an
+                // reposition animations. Remove the drag offset without an
                 // animated return to the former slot.
                 auto visual = Hosting::ElementCompositionPreview::GetElementVisual(source);
                 auto implicitAnimations = visual.ImplicitAnimations();
@@ -1954,16 +2812,9 @@ void RestoreGestureVisual(SectionGesture const& gesture) {
                 } restoreImplicit{visual, implicitAnimations};
                 visual.ImplicitAnimations(nullptr);
                 visual.StopAnimation(L"Offset");
-                visual.Properties().StopAnimation(L"Translation");
-                if (auto repeater = GetTaskbarRepeater()) {
-                    repeater.InvalidateArrange();
-                    repeater.UpdateLayout();
-                }
-                // The layout pass can start an explicit Offset animation,
-                // even with implicit animations disabled. Its final base
-                // value already reflects the new arrange rectangle.
-                visual.StopAnimation(L"Offset");
-                visual.Properties().StopAnimation(L"Translation");
+                // Do not stop a "Translation" composition property here: the
+                // hand-out visual has none, so that call throws. Callers
+                // request the next layout pass themselves.
                 source.Translation(gesture.translation);
             } catch (...) {
                 try { source.Translation(gesture.translation); } catch (...) {}
@@ -1983,18 +2834,7 @@ void FlushPendingDrop() {
     auto pending = std::move(*g_pendingDrop);
     g_pendingDrop.reset();
     ScopedTaskbarContext pendingContext(pending.gesture.window);
-    if (!pending.arranged) {
-        try { RestoreGestureVisual(pending.gesture); } catch (...) {}
-    } else {
-        // Layout is already committed. Do not invalidate it again just to
-        // restore transitions; that could schedule another reposition.
-        try {
-            if (auto source = pending.gesture.source.get()) {
-                source.Translation(pending.gesture.translation);
-                source.Transitions(pending.gesture.transitions);
-            }
-        } catch (...) {}
-    }
+    try { RestoreGestureVisual(pending.gesture); } catch (...) {}
     try {
         if (auto source = pending.gesture.source.get()) {
             Hosting::ElementCompositionPreview::GetElementVisual(source)
@@ -2008,16 +2848,13 @@ void CompletePendingDrop(FrameworkElement const& element) {
     // Called only AFTER this button's real, successful native Arrange with
     // the final split-layout rect. An invalidation request is not sufficient.
     auto& pending = *g_pendingDrop;
+    pending.arranged = true;
     try {
-        auto visual = Hosting::ElementCompositionPreview::GetElementVisual(element);
-        visual.StopAnimation(L"Offset");
-        visual.Properties().StopAnimation(L"Translation");
-        // StopAnimation may leave the old base offset behind. Commit the
-        // actual X position while preserving the Y and Z offsets.
-        auto offset = visual.Offset();
-        offset.x = element.ActualOffset().x;
-        visual.Offset(offset);
-        pending.arranged = true;
+        // XAML owns the hand-out visual's Offset. Writing it here left real
+        // taskbar buttons drawn away from their layout slot, so only stop a
+        // running reposition animation.
+        Hosting::ElementCompositionPreview::GetElementVisual(element)
+            .StopAnimation(L"Offset");
     } catch (...) {}
     try { element.Translation(pending.gesture.translation); } catch (...) {}
     // Keep transitions disabled until the pending drop has settled.
@@ -2030,11 +2867,9 @@ void SettlePendingDrop() {
         if (!source || g_unloading) { FlushPendingDrop(); return; }
         ULONGLONG elapsed = GetTickCount64() - g_pendingDrop->started;
         if (g_pendingDrop->arranged) {
-            auto visual = Hosting::ElementCompositionPreview::GetElementVisual(source);
-            double target = source.ActualOffset().x;
-            double actual = visual.Offset().x;
-            if (std::abs(actual - target) > 0.05) {
-                CompletePendingDrop(source);
+            double position = source.ActualOffset().x;
+            if (std::abs(position - g_pendingDrop->lastX) > 0.05) {
+                g_pendingDrop->lastX = position;
                 g_pendingDrop->stableSamples = 0;
             } else {
                 ++g_pendingDrop->stableSamples;
@@ -2047,7 +2882,9 @@ void SettlePendingDrop() {
             }
         }
         if (elapsed >= 2000) {
-            Wh_Log(L"Drop did not settle in 2 seconds; restoring animation settings");
+            Wh_Log(L"Drop did not settle in 2 seconds; restoring animation settings "
+                   L"(arranged=%d stableSamples=%u)",
+                   int(g_pendingDrop->arranged), g_pendingDrop->stableSamples);
             FlushPendingDrop();
         }
     } catch (...) { FlushPendingDrop(); }
@@ -2164,6 +3001,82 @@ size_t PinnedDragDestination(std::vector<double> const& widths, size_t current,
     return target;
 }
 
+// [block reorder]
+// Position, among all block orders, whose left edge is nearest to the dragged
+// block. Candidate positions depend only on the other blocks, so a reorder does
+// not change them and the result cannot oscillate.
+size_t BlockDestination(std::vector<double> const& blockWidths, size_t current,
+                        double movedLeft) {
+    if (current >= blockWidths.size()) return current;
+    double currentLeft = 0;
+    for (size_t i = 0; i < current; ++i) currentLeft += blockWidths[i];
+    size_t target = current;
+    double best = std::abs(movedLeft - currentLeft);
+    double left = 0;
+    size_t position = 0;
+    for (size_t i = 0;; ++i) {
+        if (i == current) continue;
+        // A quarter DIP dead band prevents switching back and forth at ties.
+        double distance = std::abs(movedLeft - left);
+        if (distance + 0.25 < best) {
+            best = distance;
+            target = position;
+        }
+        if (i >= blockWidths.size()) break;
+        left += blockWidths[i];
+        ++position;
+    }
+    return target;
+}
+
+// Sizes of the runs of adjacent buttons which share one identity.
+std::vector<size_t> AdjacentRuns(std::vector<std::wstring> const& keys) {
+    std::vector<size_t> runs;
+    for (size_t i = 0; i < keys.size(); ++i) {
+        if (i > 0 && !keys[i].empty() && keys[i] == keys[i - 1]) ++runs.back();
+        else runs.push_back(1);
+    }
+    return runs;
+}
+
+// Move the whole run containing |source| to |dragLeft| (the dragged button's
+// left edge, relative to the zone). Returns false if nothing moves.
+bool PlanBlockMove(std::vector<size_t> const& runs,
+                   std::vector<double> const& widths, size_t source,
+                   double dragLeft, std::vector<size_t>& newOrder) {
+    std::vector<double> blockWidths;
+    std::vector<size_t> blockStart;
+    size_t index = 0, moved = runs.size();
+    double offsetInBlock = 0;
+    for (size_t block = 0; block < runs.size(); ++block) {
+        blockStart.push_back(index);
+        double total = 0;
+        for (size_t i = 0; i < runs[block]; ++i, ++index) {
+            if (index >= widths.size()) return false;
+            if (index == source) {
+                moved = block;
+                offsetInBlock = total;
+            }
+            total += widths[index];
+        }
+        blockWidths.push_back(total);
+    }
+    if (moved == runs.size()) return false;
+    size_t target = BlockDestination(blockWidths, moved,
+                                     dragLeft - offsetInBlock);
+    if (target == moved) return false;
+    std::vector<size_t> blocks;
+    for (size_t block = 0; block < runs.size(); ++block)
+        if (block != moved) blocks.push_back(block);
+    blocks.insert(blocks.begin() + target, moved);
+    newOrder.clear();
+    for (size_t block : blocks)
+        for (size_t i = 0; i < runs[block]; ++i)
+            newOrder.push_back(blockStart[block] + i);
+    return true;
+}
+// [end block reorder]
+
 void FinishSectionReorder(SectionGesture& gesture,
                           Input::PointerRoutedEventArgs const&) {
     auto source = gesture.source.get();
@@ -2181,7 +3094,8 @@ void FinishSectionReorder(SectionGesture& gesture,
         if (!element || element.Visibility() != Visibility::Visible ||
             ButtonIsLeftSide(element) != gesture.leftSide) continue;
         live.push_back(element);
-        widths.push_back(ElementWidth(element)); // Full native arrange slots.
+        // Each cell is a slot plus the gap which follows it.
+        widths.push_back(SlotWidth(element) + gesture.sectionGap);
     }
     auto from = std::find(live.begin(), live.end(), source);
     if (from == live.end()) return;
@@ -2190,21 +3104,37 @@ void FinishSectionReorder(SectionGesture& gesture,
     // Do not modify the source order while the icon crosses the empty gap.
     if (centre < gesture.sectionStart - 2 || centre > gesture.sectionEnd + 2)
         return;
-    double relativeCentre = centre - gesture.sectionStart;
-    size_t targetIndex = gesture.leftSide
-        ? DragDestination(widths, current, relativeCentre)
-        : PinnedDragDestination(widths, current, relativeCentre);
-    if (targetIndex == current) {
-        return;
-    }
-    auto target = live[targetIndex];
-    if (!ReorderWithinSection(live, source, target, targetIndex > current)) {
-        return;
+    double relativeCentre = centre - gesture.sectionStart + gesture.sectionGap / 2;
+    std::vector<std::wstring> keys;
+    for (auto const& element : live) keys.push_back(ButtonKey(element));
+    auto runs = AdjacentRuns(keys);
+    if (runs.size() == live.size()) {
+        size_t targetIndex = gesture.leftSide
+            ? DragDestination(widths, current, relativeCentre)
+            : PinnedDragDestination(widths, current, relativeCentre);
+        if (targetIndex == current) {
+            return;
+        }
+        auto target = live[targetIndex];
+        if (!ReorderWithinSection(live, source, target,
+                                  targetIndex > current)) {
+            return;
+        }
+    } else {
+        // Moving one window past another app must move all of its windows,
+        // otherwise the next layout pass would immediately regroup them.
+        std::vector<size_t> newOrder;
+        if (!PlanBlockMove(runs, widths, current,
+                           gesture.desiredX - gesture.sectionStart, newOrder))
+            return;
+        std::vector<FrameworkElement> reordered;
+        for (size_t index : newOrder) reordered.push_back(live[index]);
+        live.swap(reordered);
     }
     std::vector<winrt::weak_ref<FrameworkElement>> nextOrder;
     for (auto const& element : live) nextOrder.emplace_back(element);
     std::vector<std::wstring> visibleIds;
-    for (auto const& element : live) visibleIds.push_back(ButtonAppId(element));
+    for (auto const& element : live) visibleIds.push_back(ButtonKey(element));
     MergeVisibleAppOrder(gesture.leftSide ? Ui().leftAppOrder : Ui().rightAppOrder, visibleIds);
     order.swap(nextOrder);
     RequestRefresh();
@@ -2256,7 +3186,7 @@ HRESULT WINAPI PointerPressed_Hook(void* self, void* rawArgs) {
                 gesture.source = source;
                 gesture.pointer = args.Pointer();
                 gesture.origin = args.GetCurrentPoint(repeater).Position();
-                gesture.appId = ButtonAppId(source);
+                gesture.appId = ButtonKey(source);
                 if (gesture.appId.empty()) return result;
                 gesture.window = owner;
                 gesture.stateRevision = Ui().stateRevision;
@@ -2276,8 +3206,8 @@ HRESULT WINAPI PointerPressed_Hook(void* self, void* rawArgs) {
                 gesture.translation = source.Translation();
                 gesture.originalSlotX = Controls::Primitives::LayoutInformation::GetLayoutSlot(source).X;
                 gesture.transitions = source.Transitions();
-                double scale = gesture.leftSide ? 1.0 : g_settings.pinnedIconScale.load() / 100.0;
-                gesture.width = ElementWidth(source) * scale;
+                gesture.width = SlotWidth(source);
+                gesture.sectionGap = gesture.leftSide ? Ui().leftGap : Ui().rightGap;
                 gesture.minX = gesture.startX;
                 double right = gesture.startX + gesture.width;
                 gesture.originalOrder = gesture.leftSide ? Ui().leftLive : Ui().rightLive;
@@ -2285,7 +3215,7 @@ HRESULT WINAPI PointerPressed_Hook(void* self, void* rawArgs) {
                     if (auto item = reference.get()) {
                         double x = ElementX(item, repeater);
                         gesture.minX = std::min(gesture.minX, x);
-                        right = std::max(right, x + ElementWidth(item) * scale);
+                        right = std::max(right, x + SlotWidth(item));
                     }
                 }
                 gesture.maxX = std::max(gesture.minX, right - gesture.width);
@@ -2294,9 +3224,20 @@ HRESULT WINAPI PointerPressed_Hook(void* self, void* rawArgs) {
                 try {
                     auto content = repeater.XamlRoot().Content().try_as<FrameworkElement>();
                     if (content) {
-                        double farRight = FixedRightEdge(content, repeater) -
-                                          g_settings.trayGap.load();
-                        gesture.minX = std::min(gesture.minX, 0.0);
+                        // Use the same verified reservations as the layout.
+                        // Even an empty right zone must avoid widgets inserted
+                        // between this press and the eventual drop.
+                        double farRight = Ui().rightEnd;
+                        double candidateRight = TrayEdgeForContent(content, content) -
+                                                g_settings.trayGap.load();
+                        double unusedLeft = 0;
+                        if (ResolveAvailableZoneBounds(0, gesture.width,
+                                EffectiveExternalSpans(content), unusedLeft, candidateRight,
+                                6.0, std::max(6.0, double(g_settings.trayGap.load())))) {
+                            farRight = std::min(farRight,
+                                candidateRight - ElementX(repeater, content));
+                        }
+                        gesture.minX = std::min(gesture.minX, Ui().leftStart);
                         if (std::isfinite(farRight)) {
                             gesture.maxX = std::max(gesture.maxX,
                                 farRight - gesture.width);
@@ -2323,7 +3264,7 @@ HRESULT WINAPI PointerMoved_Hook(void* self, void* rawArgs) {
         if (GestureMatches(source, args)) {
             args.Handled(true);
             auto repeater = GetTaskbarRepeater();
-            if (g_unloading || !repeater || ButtonAppId(source) != g_sectionGesture->appId ||
+            if (g_unloading || !repeater || ButtonKey(source) != g_sectionGesture->appId ||
                 !args.GetCurrentPoint(source).Properties().IsLeftButtonPressed() ||
                 (GetAsyncKeyState(VK_ESCAPE) & 0x8000)) {
                 CancelSectionGesture();
@@ -2375,7 +3316,15 @@ void InsertAppAtDrop(std::vector<std::wstring>& order,
     std::sort(slots.begin(), slots.end(), [](auto const& a, auto const& b) {
         return a.x < b.x;
     });
+    // Treat an app's adjacent windows as one target.
+    std::vector<TaskbarSlot> targets;
     for (auto const& slot : slots) {
+        if (!targets.empty() && targets.back().appId == slot.appId)
+            targets.back().width = slot.x + slot.width - targets.back().x;
+        else
+            targets.push_back(slot);
+    }
+    for (auto const& slot : targets) {
         if (slot.appId == id) continue;
         if (centre < slot.x + slot.width / 2) {
             auto target = std::find(order.begin(), order.end(), slot.appId);
@@ -2390,8 +3339,8 @@ void InsertAppAtDrop(std::vector<std::wstring>& order,
 
 bool CommitFixedSideDrop(SectionGesture const& gesture) {
     // The pointer may be released before the next 400 ms poll. Re-sample
-    // the live widget bounds so a move/resize cannot commit a stale zone.
-    PollWidgetGeometry(gesture.window);
+    // external widget bounds so a move/resize cannot commit a stale zone.
+    PollBoundaryGeometry(gesture.window);
     if (gesture.appId.empty() || !IsTaskbarWindow(gesture.window) ||
         !Ui().layoutValid || Ui().geometryEpoch != gesture.geometryEpoch ||
         gesture.configEpoch != g_configEpoch.load())
@@ -2422,7 +3371,7 @@ bool CommitFixedSideDrop(SectionGesture const& gesture) {
             auto item = weak.get();
             if (item && item.Visibility() == Visibility::Visible &&
                 ButtonIsLeftSide(item) == gesture.leftSide)
-                RememberApp(visibleIds, ButtonAppId(item));
+                RememberApp(visibleIds, ButtonKey(item));
         }
         MergeVisibleAppOrder(originalSide, visibleIds);
 
@@ -2475,7 +3424,7 @@ HRESULT WINAPI PointerReleased_Hook(void* self, void* rawArgs) {
             auto gesture = std::move(*g_sectionGesture);
             g_sectionGesture.reset();
             args.Handled(true);
-            if (g_unloading || ButtonAppId(source) != gesture.appId || (GetAsyncKeyState(VK_ESCAPE) & 0x8000)) {
+            if (g_unloading || ButtonKey(source) != gesture.appId || (GetAsyncKeyState(VK_ESCAPE) & 0x8000)) {
                 (gesture.leftSide ? Ui().leftLive : Ui().rightLive) = gesture.originalOrder;
                 (gesture.leftSide ? Ui().leftAppOrder : Ui().rightAppOrder) = gesture.originalAppOrder;
                 RestoreGestureVisual(gesture);
@@ -2677,7 +3626,7 @@ HWND FindTaskbarWindowForElement(FrameworkElement const& element) {
         try {
             auto root = TaskbarXamlRoot(window);
             auto content = root ? root.Content().try_as<FrameworkElement>() : nullptr;
-            auto repeater = content ? FindTaskbarRepeater(content) : nullptr;
+            auto repeater = content ? FindTaskbarRepeater(content, window) : nullptr;
             if (!repeater) continue;
             for (auto const& candidate : RepeaterElements(repeater)) {
                 if (candidate == element) {
@@ -2692,10 +3641,10 @@ HWND FindTaskbarWindowForElement(FrameworkElement const& element) {
 
 // Must run on the taskbar's owning UI thread: all these caches are thread-local.
 // Destruction on the Windhawk worker thread would leave the UI copies behind.
-void ReleaseTaskbarUiCaches(HWND window, bool dropUnrestoredVisuals) {
+void ReleaseTaskbarUiCaches(HWND window) {
     g_uiStates.erase(window);
     g_repeaterByWindow.erase(window);
-    RemoveWidgetWatch(window);
+    RemoveBoundaryWatch(window);
     g_traySearch.erase(window);
     ClearCachedOwnersForWindow(window);
     for (auto it = g_layoutOwners.begin(); it != g_layoutOwners.end();) {
@@ -2709,29 +3658,19 @@ void ReleaseTaskbarUiCaches(HWND window, bool dropUnrestoredVisuals) {
         g_widgetsNextSearch = 0;
         g_widgetsInvalidated = true;
     }
-    if (dropUnrestoredVisuals) {
-        for (auto it = g_visualStates.begin(); it != g_visualStates.end();) {
-            if (it->second.owner == window) it = g_visualStates.erase(it);
-            else ++it;
-        }
-    }
-
-    // Another taskbar on the same UI thread may still need its saved visual
-    // state for native-layout restoration. Only release the bucket arrays after
-    // every window-owned entry is gone and no arrange call is active.
+    // Clear caches only after all taskbars on this UI thread are gone.
     if (!g_unloading || g_insideArrange || g_useArrangePlan ||
         !g_uiStates.empty() || !g_layoutOwners.empty() ||
-        !g_repeaterByWindow.empty() || !g_visualStates.empty() ||
-        !g_traySearch.empty() || !g_widgetWatches.empty() || !owners.empty())
+        !g_repeaterByWindow.empty() || !g_traySearch.empty() ||
+        !g_boundaryWatches.empty() || !owners.empty())
         return;
     // swap destroys weak COM references and releases hash buckets on the UI
     // thread, while the DLL is still loaded. clear() alone retains buckets.
     decltype(g_layoutOwners){}.swap(g_layoutOwners);
     decltype(g_repeaterByWindow){}.swap(g_repeaterByWindow);
-    decltype(g_visualStates){}.swap(g_visualStates);
     decltype(g_traySearch){}.swap(g_traySearch);
     decltype(g_uiStates){}.swap(g_uiStates);
-    decltype(g_widgetWatches){}.swap(g_widgetWatches);
+    decltype(g_boundaryWatches){}.swap(g_boundaryWatches);
     decltype(owners){}.swap(owners);
     decltype(g_arrangePlan){}.swap(g_arrangePlan);
 }
@@ -2744,8 +3683,8 @@ LRESULT CALLBACK TaskbarSubclassProc(HWND window, UINT message, WPARAM wParam,
         SettlePendingDrop();
         return 0;
     }
-    if (message == WM_TIMER && wParam == WidgetPollTimerId()) {
-        PollWidgetGeometry(window);
+    if (message == WM_TIMER && wParam == BoundaryPollTimerId()) {
+        PollBoundaryGeometry(window);
         return 0;
     }
     if (message == StorageKickMessage()) {
@@ -2763,8 +3702,7 @@ LRESULT CALLBACK TaskbarSubclassProc(HWND window, UINT message, WPARAM wParam,
         if (g_sectionGesture && g_sectionGesture->window == window)
             CancelSectionGesture();
         if (g_dropSettleWindow == window) FlushPendingDrop();
-        RestoreVisualStatesForWindow(window);
-        ReleaseTaskbarUiCaches(window, true);
+        ReleaseTaskbarUiCaches(window);
         {
             std::lock_guard<std::mutex> lock(g_windowsMutex);
             g_subclassedTaskbars.erase(window);
@@ -2792,36 +3730,33 @@ LRESULT CALLBACK TaskbarSubclassProc(HWND window, UINT message, WPARAM wParam,
         if (g_sectionGesture && g_sectionGesture->window == window)
             CancelSectionGesture();
         if (g_dropSettleWindow == window) FlushPendingDrop();
-        bool visualStatesRestored = RestoreVisualStatesForWindow(window);
         bool nativeLayoutUpdated = false;
         try {
             if (auto repeater = GetTaskbarRepeater()) {
-                // Restore original XAML geometry while Arrange hooks bypass
-                // split positioning during unload, then restore visuals once
-                // more if a late native state transition reintroduced a scale.
+                // Return to native Windows layout before unloading.
                 repeater.InvalidateArrange();
                 repeater.UpdateLayout();
-                visualStatesRestored = RestoreVisualStatesForWindow(window) &&
-                                       visualStatesRestored;
                 nativeLayoutUpdated = true;
             }
         } catch (...) {
             Wh_Log(L"Native layout restoration failed on one monitor");
         }
-        bool restored = nativeLayoutUpdated && visualStatesRestored;
-        // On the first attempt retain failed visual states for retry. On the
-        // final attempt release all other UI-owned caches even on failure.
-        if (g_unloading && (restored || wParam == 1))
-            ReleaseTaskbarUiCaches(window, !restored);
-        return restored ? 1 : 0;
+        // Keep the final attempt behavior if native layout restoration fails.
+        if (g_unloading && (nativeLayoutUpdated || wParam == 1))
+            ReleaseTaskbarUiCaches(window);
+        return nativeLayoutUpdated ? 1 : 0;
     }
     if (message == WM_DISPLAYCHANGE || message == WM_DPICHANGED ||
         message == WM_SETTINGCHANGE) {
         g_widgetsInvalidated = true;
         Ui().layoutValid = false;
         ++Ui().geometryEpoch;  // invalidates in-progress drag snapshots
+        g_repeaterByWindow.erase(window);
         g_traySearch.erase(window);
-        PollWidgetGeometry(window);
+        // A previous monitor's widget sizes must not survive a resize,
+        // reconnection, or DPI change into the current layout.
+        RemoveBoundaryWatch(window);
+        // The next arrange pass recreates the watch with fresh geometry.
         // Taskbar windows may be added or removed when displays change.
         // Windows will arrange each new secondary taskbar; the layout hook
         // installs its subclass when that taskbar becomes ready.
@@ -3062,7 +3997,9 @@ BOOL Wh_ModInit() {
 void Wh_ModAfterInit() {
     // No process or window restarts. Register existing primary + secondary
     // windows; future taskbars are detected by the Arrange hook.
-    for (HWND window : AllTaskbarWindows()) EnsureTaskbarSubclass(window);
+    auto windows = AllTaskbarWindows();
+    Wh_Log(L"Taskbar discovery: %zu taskbar windows at initialization", windows.size());
+    for (HWND window : windows) EnsureTaskbarSubclass(window);
     if (!g_viewHooksInstalled) {
         if (HMODULE module = CurrentTaskbarViewModule())
             TryHookLoadedTaskbarView(module);
@@ -3104,7 +4041,7 @@ void Wh_ModBeforeUninit() {
         // Native HWND timers do not hold function pointers, but they should
         // still be canceled even when the UI owner missed RestoreMessage().
         KillTimer(window, StorageTimerId());
-        KillTimer(window, WidgetPollTimerId());
+        KillTimer(window, BoundaryPollTimerId());
         // RemoveWindowSubclassFromAnyThread returns void.
         WindhawkUtils::RemoveWindowSubclassFromAnyThread(window, TaskbarSubclassProc);
     }
